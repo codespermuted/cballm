@@ -1,2 +1,2 @@
-from cortex.cli import main
+from cballm.cli import main
 main()

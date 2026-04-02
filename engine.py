@@ -1,4 +1,4 @@
-"""Cortex 엔진 — Qwopus의 LLM 엔진을 가져다 쓴다."""
+"""CBALLM 엔진 — Qwopus의 LLM 엔진을 가져다 쓴다."""
 from __future__ import annotations
 
 import sys

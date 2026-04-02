@@ -5,8 +5,8 @@ import re
 import subprocess
 from abc import ABC
 
-from cortex.session import WorkerSession
-from cortex.engine import chat
+from cballm.session import WorkerSession
+from cballm.engine import chat
 
 
 class BaseWorker(ABC):

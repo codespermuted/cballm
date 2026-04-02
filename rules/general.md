@@ -1,6 +1,6 @@
-# Cortex AutoML — 범용 시계열 모델링 규칙·노하우·업계 표준
+# CBALLM AutoML — 범용 시계열 모델링 규칙·노하우·업계 표준
 
-> 이 문서는 LLM 오케스트레이터(Cortex)의 각 워커가 모델링 의사결정 시 참조하는  
+> 이 문서는 LLM 오케스트레이터(CBALLM)의 각 워커가 모델링 의사결정 시 참조하는  
 > **일반화된 규칙 + 실전 노하우 + 업계 표준**을 집대성한 것이다.  
 > 어떤 도메인의 시계열에든 적용 가능하도록 설계되었다.
 
@@ -167,7 +167,7 @@ Step 5: 반복 — Critic의 피드백에 따라 prior 추가/수정/제거
 
 #### 3-Bias Taxonomy (PIML 표준 분류, Karniadakis et al.)
 
-Physics-Informed Machine Learning 분야에서 **3가지 bias를 통한 prior 주입**이 표준 분류로 자리잡았다 (Springer 2025 survey, ACM Computing Surveys 2025, Applied Sciences 2023). Cortex는 이 분류를 시계열 예측에 맞게 적용한다.
+Physics-Informed Machine Learning 분야에서 **3가지 bias를 통한 prior 주입**이 표준 분류로 자리잡았다 (Springer 2025 survey, ACM Computing Surveys 2025, Applied Sciences 2023). CBALLM은 이 분류를 시계열 예측에 맞게 적용한다.
 
 **① Observational Bias — 데이터 레벨 주입**
 
@@ -280,7 +280,7 @@ Phase 3 (full): 모든 loss term 활성화, 전체 최적화
 
 #### AutoML 파이프라인에서의 Prior 활용 전략
 
-Cortex의 AutoML 맥락에서 prior 주입은 3가지 경로로 적용:
+CBALLM의 AutoML 맥락에서 prior 주입은 3가지 경로로 적용:
 
 **경로 A: 범용 모델 zoo에 feature-level prior (Observational Bias)**  
 AutoGluon/LightGBM 등 범용 모델을 그대로 쓰되, Engineer 워커가 도메인 feature를 생성. 가장 낮은 비용으로 가장 넓은 적용 범위. 모든 프로젝트의 기본.
@@ -555,7 +555,7 @@ Git tag로 모델 버전 + 데이터 snapshot 연결
 
 ---
 
-## 요약: Cortex 워커별 핵심 한 줄
+## 요약: CBALLM 워커별 핵심 한 줄
 
 | 워커 | 핵심 규칙 |
 |---|---|

@@ -4,18 +4,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cortex.engine import chat
-from cortex.session import WorkerSession
-from cortex.workers.scout import Scout
-from cortex.workers.engineer import Engineer
-from cortex.workers.architect import Architect
-from cortex.workers.trainer import Trainer
-from cortex.workers.critic import Critic
+from cballm.engine import chat
+from cballm.session import WorkerSession
+from cballm.workers.scout import Scout
+from cballm.workers.engineer import Engineer
+from cballm.workers.architect import Architect
+from cballm.workers.trainer import Trainer
+from cballm.workers.critic import Critic
 
 MAX_ITERATIONS = 3
 
 ORCHESTRATOR_PROMPT = """\
-You are Cortex Brain, an AI data science orchestrator.
+You are CBALLM Brain, an AI data science orchestrator.
 You manage 5 specialist workers to build the best forecasting model.
 
 Workers:
@@ -113,7 +113,7 @@ class Brain:
     def run_pipeline(self, data_path: str, target_col: str = "target",
                      prediction_length: int = 24, user_instructions: str = "") -> dict:
         """전체 예측 파이프라인을 실행한다."""
-        print("🧠 Cortex Brain — 파이프라인 시작")
+        print("🧠 CBALLM Brain — 파이프라인 시작")
         print(f"   데이터: {data_path}")
         print(f"   타겟: {target_col}, 예측 길이: {prediction_length}")
         if user_instructions:

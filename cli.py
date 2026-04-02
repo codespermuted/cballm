@@ -1,4 +1,4 @@
-"""Cortex CLI — AI 데이터 사이언티스트 오케스트레이터."""
+"""CBALLM CLI — AI 데이터 사이언티스트 오케스트레이터."""
 from __future__ import annotations
 
 import argparse
@@ -6,18 +6,18 @@ import json
 import sys
 from pathlib import Path
 
-from cortex.brain import Brain
+from cballm.brain import Brain
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Cortex — AI Data Scientist Orchestrator")
+    parser = argparse.ArgumentParser(description="CBALLM — AI Data Scientist Orchestrator")
     parser.add_argument("data", help="데이터 파일 경로 (csv, parquet)")
     parser.add_argument("--target", default="target", help="타겟 컬럼명 (기본: target)")
     parser.add_argument("--horizon", type=int, default=24, help="예측 길이 (기본: 24)")
     parser.add_argument("--rules", default="", help="도메인 룰 디렉토리 경로")
     parser.add_argument("--cwd", default=".", help="작업 디렉토리")
     parser.add_argument("--instructions", default="", help="추가 지시사항")
-    parser.add_argument("--output", default="cortex_report.json", help="결과 저장 경로")
+    parser.add_argument("--output", default="cballm_report.json", help="결과 저장 경로")
 
     args = parser.parse_args()
 
@@ -30,7 +30,7 @@ def main():
 
     print()
     print("╔══════════════════════════════════════════════════╗")
-    print("║  🧠 Cortex — AI Data Scientist Orchestrator     ║")
+    print("║  🧠 CBALLM — AI Data Scientist Orchestrator     ║")
     print("║     Scout → Engineer → Architect → Trainer →    ║")
     print("║     Critic → (iterate)                          ║")
     print("╚══════════════════════════════════════════════════╝")
