@@ -61,10 +61,23 @@ Generate a single ```python``` code block that:
 5. Saves results JSON for Critic
 6. Prints leaderboard + ensemble weights
 
-Use C-BAL if available:
+Use standard libraries (pandas, numpy, scikit-learn, pytorch).
+C-BAL은 PYTHONPATH에 이미 설정되어 있으므로 직접 import 가능:
 ```python
-import sys
-sys.path.insert(0, '/workspace/Desktop/myforecaster-project')
 from cbal.predictor import TimeSeriesPredictor
+```
+
+PyTorch 모델을 직접 구현할 때:
+```python
+import torch
+import torch.nn as nn
+# temporal split 엄수, val로만 모델 선택
+```
+
+**반드시 실제 학습을 실행하고 메트릭을 출력해야 함. 코드만 생성하고 실행 안 하면 안 됨.**
+메트릭 출력 형식:
+```
+METRICS: {"MAE": 0.xxx, "MSE": 0.xxx, "RMSE": 0.xxx}
+BEST_MODEL: model_name
 ```
 """

@@ -57,18 +57,34 @@ class BaseWorker(ABC):
         blocks = re.findall(r"```python\s*\n(.*?)```", text, re.DOTALL)
         return "\n\n".join(blocks) if blocks else ""
 
-    def _run_code(self, code: str) -> str:
+    def _run_code(self, code: str, timeout: int = 300) -> str:
+        import os
+        env = os.environ.copy()
+        # C-BAL 및 기타 프로젝트 경로 추가
+        extra_paths = [
+            "/workspace/Desktop/myforecaster-project",
+            "/workspace/Desktop/cballm",
+            "/workspace/Desktop/qwen_claude_distill",
+        ]
+        env["PYTHONPATH"] = ":".join(extra_paths) + ":" + env.get("PYTHONPATH", "")
+        env["PYTHONUNBUFFERED"] = "1"
+
         try:
             result = subprocess.run(
                 ["python3", "-c", code],
                 capture_output=True, text=True,
-                cwd=self.cwd, timeout=120,
+                cwd=self.cwd, timeout=timeout,
+                env=env,
             )
             output = result.stdout
             if result.stderr:
-                output += "\n[STDERR]\n" + result.stderr
-            return (output or "(출력 없음)")[:3000]
+                # 경고는 무시, 에러만 포함
+                errors = [l for l in result.stderr.split("\n")
+                         if "Error" in l or "Traceback" in l or "error" in l.lower()]
+                if errors:
+                    output += "\n[STDERR]\n" + "\n".join(errors[-10:])
+            return (output or "(출력 없음)")[:5000]
         except subprocess.TimeoutExpired:
-            return "(타임아웃 120초)"
+            return f"(타임아웃 {timeout}초 — 학습 시간 초과)"
         except Exception as e:
             return f"(오류: {e})"

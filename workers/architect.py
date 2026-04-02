@@ -69,6 +69,19 @@ For each domain prior, classify by confidence:
 - LightGBM + lag/rolling features ≈ DL performance (M5 proven).
 - Foundation models (Chronos, TimesFM) = good zero-shot baseline, not final answer.
 
+## Research (검색)
+
+데이터 특성에 맞는 최신 모델/기법을 조사할 때 코드 블록에서 검색 가능:
+```python
+from tools.search_helper import search_models, search_technique
+# 관련 모델 검색
+print(search_models("time series forecasting transformer hourly"))
+# 기법 검색
+print(search_technique("regime aware time series prediction"))
+```
+
+검색 결과를 참고하되, 검색 결과만으로 모델을 선택하지 말고 데이터 특성 + 룰 기반으로 판단.
+
 ## Output format
 
 ```json

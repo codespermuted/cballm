@@ -105,7 +105,32 @@ def check_leakage(df, feature_col, target_col, datetime_col, prediction_length):
 - **통계값(mean, std 등)을 코드 실행 없이 말하지 않는다**
 - **"아마 이럴 것이다"는 금지 — 확인하고 말한다**
 
-## 5. Hallucination 방지 체크리스트
+## 5. Learning Curve를 통한 과적합/일반화 판단
+
+**모든 학습 후 learning curve를 반드시 확인한다.**
+
+```python
+# Learning curve 패턴
+train_sizes = [0.2, 0.4, 0.6, 0.8, 1.0]  # 데이터 비율
+for size in train_sizes:
+    train_subset = train[:int(len(train) * size)]
+    model.fit(train_subset)
+    train_score = evaluate(model, train_subset)
+    val_score = evaluate(model, val)
+    print(f"size={size:.0%}: train={train_score:.4f}, val={val_score:.4f}")
+```
+
+판단 기준:
+| 패턴 | 진단 | 대응 |
+|------|------|------|
+| train↓ val↓ (둘 다 감소, gap 좁음) | 정상 학습 | 데이터 더 모으면 개선 |
+| train↓ val→ (val 정체) | 모델 용량 부족 | 더 복잡한 모델 또는 feature 추가 |
+| train↓↓ val↑ (val 증가) | **과적합** | 모델 단순화, regularization, 데이터 증량 |
+| train→ val→ (둘 다 정체) | ceiling 도달 | 새로운 외부 데이터 필요 |
+
+**train-val gap이 클수록 과적합.** Gap이 줄어드는 추세면 건강한 학습.
+
+## 6. Hallucination 방지 체크리스트
 
 매 워커 실행 후 자동 확인:
 - [ ] 데이터를 실제로 로드했는가? (추측이 아닌 실행 결과인가?)

@@ -1,0 +1,42 @@
+{
+  "preset": "best_quality",
+  "models": [
+    "SeasonalNaive",
+    "ETS",
+    "Theta",
+    "AutoARIMA",
+    "LightGBM",
+    "CatBoost",
+    "N-HiTS",
+    "PatchTST",
+    "TFT",
+    "iTransformer",
+    "DLinear",
+    "N-BEATS"
+  ],
+  "loss": "MAE",
+  "prediction_length": 24,
+  "validation_strategy": "expanding_window",
+  "validation_days": 7,
+  "ensemble_method": "greedy_weighted",
+  "prior_injection": {
+    "observational": [
+      "hour_sin, hour_cos (24h seasonality encoding)",
+      "day_of_week (7-day seasonality)",
+      "is_weekend binary flag",
+      "lag-24, lag-168 (daily/weekly lags, shifted by prediction_length)",
+      "rolling_mean_24, rolling_std_24 (shifted by prediction_length)",
+      "Other ETTh1 columns as exogenous features (MT*, HL, LL if available)"
+    ],
+    "inductive": [
+      "Causal attention mask (no future peeking)",
+      "Positivity constraint on temperature predictions (softplus output)"
+    ],
+    "learning": [
+      "Smoothness penalty on predictions (L2 on prediction differences)",
+      "Regime-conditional weighting: 2x weight on extreme segments"
+    ]
+  },
+  "regime_strategy": "gate",
+  "reasoning": "\nARCHITECTURE DESIGN RATIONALE:\n\n1. PRESET: best_quality\n   - 17420 samples is sufficient for DL models\n   - ETTh1 is a standard benchmark, worth investing compute\n   - Extreme ratio 9.95% warrants comprehensive approach\n\n2. MODEL SELECTION (13 models, 4 diversity axes):\n   \n   LOCAL vs GLOBAL:\n   - Local: SeasonalNaive, ETS, Theta, AutoARIMA (series-independent)\n   - Global: LightGBM, TFT, iTransformer (can share patterns)\n   \n   LINEAR vs NONLINEAR:\n   - Linear: AutoARIMA, DLinear, ETS\n   - Nonlinear: LightGBM, CatBoost, TFT, N-HiTS, PatchTST\n   \n   POINT vs DISTRIBUTIONAL:\n   - Point: Most models above\n   - Distributional: TFT (quantile outputs)\n   \n   ARCHITECTURE FAMILY:\n   - Statistical: ETS, Theta, AutoARIMA, SeasonalNaive\n   - Tree: LightGBM, CatBoost\n   - Transformer: TFT, iTransformer, PatchTST\n   - CNN/Residual: N-HiTS, N-BEATS, DLinear\n\n3. LOSS: MAE\n   - Primary metric for ETTh1 benchmark\n   - Robust to outliers compared to MSE\n\n4. VALIDATION: expanding_window, 7 days\n   - Temporal split mandatory\n   - 7 days = 168 hours = one full weekly cycle\n   - Expanding window mimics real deployment\n\n5. ENSEMBLE: greedy_weighted\n   - Caruana 2004 method, proven in M4/M5\n   - Automatically selects diverse models\n   - More robust than stacking for time series\n\n6. PRIOR INJECTION:\n   \n   OBSERVATIONAL (feature-level):\n   - Hourly data \u2192 24h & 168h seasonality is LAW\n   - lag-24, lag-168 are essential\n   - ETTh1 has exogenous variables (MT*, HL, LL) \u2192 use them\n   \n   INDUCTIVE (architecture-level):\n   - Causal mask: future cannot predict past (hard constraint)\n   - Temperature positivity: softplus output activation\n   \n   LEARNING (loss-level):\n   - Smoothness penalty: temperature doesn't jump instantly\n   - Regime weighting: extreme events are rare but important\n\n7. REGIME STRATEGY: gate\n   - Extreme ratio 9.95% is non-negligible\n   - Regime gate: normal head + extreme head with soft switch\n   - Learns to route based on input patterns\n\n8. WHY THESE MODELS SPECIFICALLY:\n   - N-HiTS: Multi-scale decomposition, excellent for hourly seasonality\n   - TFT: Attention mechanism, handles exogenous variables well\n   - PatchTST: Patching + transformer, SOTA on many benchmarks\n   - LightGBM: M5 proven, fast, handles tabular features excellently\n   - ETS/Theta: Simple models often beat DL in normal regime (M4 proven)\n   - DLinear: Surprisingly strong baseline, captures linear trends well\n"
+}
