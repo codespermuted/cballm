@@ -1,0 +1,39 @@
+# Training Stability Rules
+
+rules:
+  TRAIN-001:
+    description: "Backbone capacity별 HP preset 차등 적용."
+    enforcement: "Trainer 자동"
+
+  TRAIN-002:
+    description: "best_epoch=0이면 학습 미시작. lr 조정 권장."
+    enforcement: "Critic 감지"
+
+  TRAIN-003:
+    description: "val 대비 test 성능 2배 이상 나쁘면 분포 차이 경고."
+    enforcement: "Critic 비교"
+
+hp_presets:
+  minimal:
+    lr: 1.0e-3
+    epochs: 50
+    patience: 10
+    weight_decay: 1.0e-4
+
+  low:
+    lr: 5.0e-4
+    epochs: 100
+    patience: 15
+    weight_decay: 1.0e-5
+
+  medium:
+    lr: 1.0e-4
+    epochs: 100
+    patience: 15
+    weight_decay: 1.0e-5
+
+  high:
+    lr: 1.0e-4
+    epochs: 200
+    patience: 20
+    weight_decay: 1.0e-5

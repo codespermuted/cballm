@@ -1,4 +1,8 @@
-"""Trainer — 템플릿 기반 학습 실행기. LLM 코드 생성 없이 config → 학습 → 결과."""
+"""Trainer — 템플릿 기반 학습 실행기 (v2).
+
+v2 변경: normalizer/temporal_mixer/channel_mixer/head 슬롯 지원,
+capacity 기반 HP preset, forecasting setting 지원.
+"""
 from __future__ import annotations
 
 import json
@@ -6,10 +10,7 @@ import re
 
 
 class Trainer:
-    """Architect의 JSON config를 받아 결정론적으로 학습을 실행한다.
-
-    LLM 호출 없음. build_model(config) → train loop → 표준 결과 JSON.
-    """
+    """Architect의 JSON config를 받아 결정론적으로 학습을 실행한다."""
     name = "trainer"
     description = "Config 기반 학습 실행 + 표준 결과 출력"
 
@@ -21,12 +22,10 @@ class Trainer:
         """task에서 config와 데이터 정보를 추출하여 학습 실행."""
         from cballm.blocks.trainer_engine import train_model
 
-        # task에서 필요한 정보 추출
         data_path = self._extract_field(task, "DATA_PATH")
         target_col = self._extract_field(task, "TARGET_COL") or "OT"
         pred_len = int(self._extract_field(task, "PREDICTION_LENGTH") or "96")
 
-        # Architect의 model config JSON 추출
         model_config = self._extract_model_config(task)
 
         if not data_path:
@@ -37,19 +36,31 @@ class Trainer:
                 "execution_result": "METRICS: {}\nBEST_MODEL: FAILED",
             }
 
-        # 파이프라인 설정 추출 (Architect Decision Protocol 결과)
+        # 파이프라인 설정 추출
         input_design = model_config.pop("input_design", {})
         preprocessing = model_config.pop("preprocessing", {})
         training = model_config.pop("training", {})
+        forecasting_setting = model_config.pop("forecasting_setting", None)
+        output_dim = model_config.pop("output_dim", 1)
+        recipe_name = model_config.pop("_recipe_name", "custom")
 
         seq_len = input_design.get("seq_len", 96)
         n_folds = training.get("n_folds", 3)
 
-        print(f"  📦 Config: {json.dumps(model_config, ensure_ascii=False)[:200]}")
-        print(f"  📂 Data: {data_path}, Target: {target_col}, H: {pred_len}, seq_len: {seq_len}")
+        # normalizer에 따라 skip_dataset_norm 결정
+        normalizer_cfg = model_config.get("normalizer")
+        skip_norm = False
+        if normalizer_cfg:
+            norm_type = normalizer_cfg if isinstance(normalizer_cfg, str) \
+                else normalizer_cfg.get("type", "")
+            if norm_type in ("RevIN", "RobustScaler"):
+                skip_norm = True
+
+        print(f"  Config: {json.dumps(model_config, ensure_ascii=False)[:200]}")
+        print(f"  Data: {data_path}, Target: {target_col}, H: {pred_len}, seq_len: {seq_len}")
+        print(f"  Setting: {forecasting_setting}, Recipe: {recipe_name}")
 
         try:
-            # preprocessing을 model_config에 다시 넣어서 train_model이 처리
             model_config["preprocessing"] = preprocessing
 
             result = train_model(
@@ -66,6 +77,9 @@ class Trainer:
             response = result.to_json()
             exec_result = result.to_critic_text()
 
+            # recipe name 추가
+            exec_result = f"RECIPE: {recipe_name}\n{exec_result}"
+
         except Exception as e:
             import traceback
             error_msg = traceback.format_exc()
@@ -80,39 +94,33 @@ class Trainer:
         }
 
     def _extract_field(self, text: str, field: str) -> str | None:
-        """task 텍스트에서 필드값 추출."""
-        # DATA_PATH = '/path/to/file' 형태
         match = re.search(rf"{field}\s*=\s*['\"]([^'\"]+)['\"]", text)
         if match:
             return match.group(1)
-        # DATA_PATH = value (따옴표 없는 경우)
         match = re.search(rf"{field}\s*=\s*(\S+)", text)
         return match.group(1) if match else None
 
     def _extract_model_config(self, text: str) -> dict:
-        """Architect의 JSON config 추출. 없으면 기본 config 반환."""
+        """Architect의 JSON config 추출."""
         from cballm.blocks.builder import list_available_blocks
 
-        # JSON 블록 추출 시도 (여러 전략)
         config = self._try_parse_json(text)
 
         if config is None:
-            print("  ⚠️ Model config 추출 실패, 기본 config 사용")
+            print("  Model config 추출 실패, 기본 config 사용")
             return self._default_config()
 
-        # Architect의 전체 설계 JSON에서 블록 config만 추출
-        if "models" in config and "encoder" not in config:
-            config = self._convert_architect_to_block_config(config)
+        # v1 포맷 감지
+        if "backbone" in config and "temporal_mixer" not in config:
+            # builder가 v1→v2 변환을 담당하므로 그대로 전달
+            pass
 
-        # 블록 이름 검증 — hallucinated name 방어
+        # 블록 이름 검증
         config = self._validate_block_names(config, list_available_blocks())
 
         return config
 
     def _try_parse_json(self, text: str) -> dict | None:
-        """여러 전략으로 JSON 추출 시도."""
-        import json
-
         # 전략 1: ```json ... ``` 블록
         match = re.search(r'```json\s*\n(.*?)```', text, re.DOTALL)
         if match:
@@ -121,7 +129,7 @@ class Trainer:
             except json.JSONDecodeError:
                 pass
 
-        # 전략 2: 균형 잡힌 중괄호로 JSON 추출
+        # 전략 2: 균형 잡힌 중괄호
         for i, ch in enumerate(text):
             if ch == '{':
                 depth = 0
@@ -135,7 +143,10 @@ class Trainer:
                         try:
                             parsed = json.loads(candidate)
                             if isinstance(parsed, dict) and any(
-                                k in parsed for k in ("encoder", "backbone", "loss", "models")
+                                k in parsed for k in (
+                                    "encoder", "temporal_mixer", "backbone",
+                                    "normalizer", "loss",
+                                )
                             ):
                                 return parsed
                         except json.JSONDecodeError:
@@ -145,78 +156,63 @@ class Trainer:
         return None
 
     def _validate_block_names(self, config: dict, available: dict) -> dict:
-        """블록 이름이 카탈로그에 있는지 검증. 없으면 fallback."""
+        """블록 이름이 카탈로그에 있는지 검증."""
         slot_map = {
-            "encoder": available["encoder"],
-            "backbone": available["backbone"],
-            "loss": available["loss"],
+            "encoder": available.get("encoder", []),
+            "temporal_mixer": available.get("temporal_mixer", []),
+            "normalizer": available.get("normalizer", []),
+            "head": available.get("head", []),
+            "loss": available.get("loss", []),
+            # v1 호환
+            "backbone": available.get("temporal_mixer", []),
         }
 
         for slot, valid_names in slot_map.items():
             if slot in config and isinstance(config[slot], dict):
                 block_type = config[slot].get("type", "")
-                if block_type not in valid_names:
-                    print(f"  ⚠️ 알 수 없는 {slot}: '{block_type}' → fallback")
-                    fallback = {"encoder": "Linear", "backbone": "MLP", "loss": "MAE"}
-                    config[slot] = {"type": fallback[slot]}
+                if block_type and valid_names and block_type not in valid_names:
+                    print(f"  알 수 없는 {slot}: '{block_type}' → fallback")
+                    fallback = {
+                        "encoder": "LinearProjection",
+                        "temporal_mixer": "LinearMix",
+                        "backbone": "Linear",
+                        "normalizer": "RevIN",
+                        "head": "LinearHead",
+                        "loss": "MAE",
+                    }
+                    config[slot] = {"type": fallback.get(slot, "LinearMix")}
 
-        # regime 검증
-        if "regime" in config and config["regime"]:
-            if isinstance(config["regime"], dict):
-                regime_type = config["regime"].get("type", "")
-                if regime_type not in available["regime"]:
-                    print(f"  ⚠️ 알 수 없는 regime: '{regime_type}' → 제거")
-                    del config["regime"]
+        # channel_mixer 검증
+        if "channel_mixer" in config and config["channel_mixer"]:
+            ch = config["channel_mixer"]
+            if isinstance(ch, dict):
+                ch_type = ch.get("type", "")
+                valid_ch = available.get("channel_mixer", [])
+                if ch_type and valid_ch and ch_type not in valid_ch:
+                    print(f"  알 수 없는 channel_mixer: '{ch_type}' → 제거")
+                    config["channel_mixer"] = None
 
         # constraint 검증
         if "constraint" in config:
             valid_constraints = []
             for c in config["constraint"]:
-                if isinstance(c, dict) and c.get("type") in available["constraint"]:
+                if isinstance(c, dict) and c.get("type") in available.get("constraint", []):
                     valid_constraints.append(c)
                 else:
-                    print(f"  ⚠️ 알 수 없는 constraint: '{c}' → 제거")
+                    print(f"  알 수 없는 constraint: '{c}' → 제거")
             config["constraint"] = valid_constraints
-
-        return config
-
-    def _convert_architect_to_block_config(self, architect_config: dict) -> dict:
-        """기존 Architect JSON (models 리스트) → 블록 config 변환."""
-        models = architect_config.get("models", [])
-        loss = architect_config.get("loss", "MAE")
-        regime = architect_config.get("regime_strategy", "none")
-
-        backbone_map = {
-            "DLinear": "Linear",
-            "Linear": "Linear",
-            "PatchTST": "PatchMLP",
-            "N-HiTS": "PatchMLP",
-        }
-
-        backbone_type = "Linear"  # default
-        for m in models:
-            if m in backbone_map:
-                backbone_type = backbone_map[m]
-                break
-
-        config = {
-            "encoder": {"type": "Linear"},
-            "backbone": {"type": backbone_type},
-            "constraint": [],
-            "loss": {"type": loss if loss in ["MAE", "MSE", "Huber", "Quantile"] else "MAE"},
-        }
-
-        if regime and regime != "none":
-            config["regime"] = {"type": "SoftGate", "n_regimes": 2}
 
         return config
 
     @staticmethod
     def _default_config() -> dict:
-        """안전한 기본 config — MLP backbone, MAE loss."""
+        """안전한 기본 config (v2)."""
         return {
-            "encoder": {"type": "Linear"},
-            "backbone": {"type": "MLP", "hidden_dim": 256},
+            "normalizer": {"type": "RevIN"},
+            "encoder": {"type": "LinearProjection"},
+            "temporal_mixer": {"type": "LinearMix"},
+            "channel_mixer": None,
+            "head": {"type": "LinearHead"},
             "constraint": [],
             "loss": {"type": "MAE"},
         }

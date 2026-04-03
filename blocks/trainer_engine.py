@@ -147,6 +147,8 @@ STANDARD_SPLITS = {
     "weather": (25750, 29394, 36792),
     # ECL (Electricity): 26304 rows, 7:1:2
     "ECL": (18412, 21044, 26304),
+    # SMP hourly: 98232 rows, last 2 months test (~1441), val = 2 months before that
+    "smp_hourly": (94909, 96791, 98232),
 }
 
 
@@ -185,18 +187,37 @@ def train_model(
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # ── Backbone별 HP 자동 조정 ──
-    backbone_type = model_config.get("backbone", {}).get("type", "Linear")
-    hp_presets = {
-        "Linear":      {"lr": 1e-3,  "epochs": 50,  "patience": 10, "wd": 1e-4},
-        "PatchMLP":    {"lr": 1e-4,  "epochs": 200, "patience": 20, "wd": 1e-5},
+    # ── Capacity 기반 HP 자동 조정 (v2) ──
+    # v2: temporal_mixer의 capacity로 결정, v1: backbone type으로 fallback
+    mixer_type = model_config.get("temporal_mixer", {}).get("type", "") if isinstance(
+        model_config.get("temporal_mixer"), dict) else model_config.get("temporal_mixer", "")
+    backbone_type = model_config.get("backbone", {}).get("type", "") if isinstance(
+        model_config.get("backbone"), dict) else ""
+
+    # capacity 매핑
+    capacity_map = {
+        # v2 temporal mixers
+        "LinearMix": "minimal", "MLPMix": "low", "GatedMLPMix": "medium",
+        "PatchMLPMix": "medium", "AttentionMix": "high", "PatchAttentionMix": "high",
+        "ConvMix": "medium", "RecurrentMix": "medium",
+        # v1 backbones
+        "Linear": "minimal", "PatchMLP": "medium",
     }
-    preset = hp_presets.get(backbone_type, hp_presets["Linear"])
+    capacity = capacity_map.get(mixer_type, capacity_map.get(backbone_type, "minimal"))
+
+    hp_presets = {
+        "minimal": {"lr": 1e-3,  "epochs": 50,  "patience": 10, "wd": 1e-4},
+        "low":     {"lr": 5e-4,  "epochs": 100, "patience": 15, "wd": 1e-5},
+        "medium":  {"lr": 1e-4,  "epochs": 100, "patience": 15, "wd": 1e-5},
+        "high":    {"lr": 1e-4,  "epochs": 200, "patience": 20, "wd": 1e-5},
+    }
+    preset = hp_presets.get(capacity, hp_presets["minimal"])
     lr = preset["lr"]
     epochs = preset["epochs"]
     patience = preset["patience"]
     weight_decay = preset["wd"]
-    print(f"HP preset ({backbone_type}): lr={lr}, epochs={epochs}, patience={patience}, wd={weight_decay}")
+    block_name = mixer_type or backbone_type or "Linear"
+    print(f"HP preset ({block_name}, capacity={capacity}): lr={lr}, epochs={epochs}, patience={patience}, wd={weight_decay}")
 
     # ── 1. 데이터 로드 ──
     if data_path.endswith(".parquet"):
@@ -252,12 +273,23 @@ def train_model(
         train_end = folds[0][0] if folds else int(n_total * 0.7)
     print(f"CV folds: {len(folds)}, test_start: {test_start}")
 
-    # ── 3. 정규화 — train split 통계만 사용 (leakage 방지) ──
+    # ── 3. 정규화 — DatasetNorm은 항상 적용 (벤치마크 비교 기준) ──
+    # RevIN/RobustScaler는 DatasetNorm 위에서 instance-level 정규화로 동작.
+    # 논문 표준: DatasetNorm(train mean/std) + RevIN(instance) 모두 적용.
     train_data = data_values[:train_end]
     means = train_data.mean(axis=0)
     stds = train_data.std(axis=0) + 1e-8
     data_norm = (data_values - means) / stds
-    print(f"정규화: train[:{train_end}]의 mean/std 사용 (test 정보 미포함)")
+
+    normalizer_cfg = model_config.get("normalizer")
+    norm_type = ""
+    if normalizer_cfg:
+        norm_type = normalizer_cfg if isinstance(normalizer_cfg, str) \
+            else normalizer_cfg.get("type", "") if isinstance(normalizer_cfg, dict) else ""
+    if norm_type:
+        print(f"정규화: DatasetNorm(train[:{train_end}]) + {norm_type}(instance)")
+    else:
+        print(f"정규화: DatasetNorm(train[:{train_end}])")
 
     # 극단값 threshold: train 분포 기준
     target_values_train = data_values[:train_end, target_idx]
@@ -288,7 +320,7 @@ def train_model(
         model, loss_fn = build_model(
             _deep_copy_config(model_config),
             seq_len=seq_len, pred_len=pred_len,
-            n_features=n_features,
+            n_features=n_features, target_idx=target_idx,
         )
         model = model.to(device)
         loss_fn = loss_fn.to(device)
@@ -408,7 +440,7 @@ def train_model(
         model, loss_fn = build_model(
             _deep_copy_config(model_config),
             seq_len=seq_len, pred_len=pred_len,
-            n_features=n_features,
+            n_features=n_features, target_idx=target_idx,
         )
         model = model.to(device)
         loss_fn = loss_fn.to(device)

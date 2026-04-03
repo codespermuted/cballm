@@ -1,15 +1,16 @@
-"""CBALLM Blocks — 슬롯 기반 시계열 모델 조립 시스템.
+"""CBALLM Blocks — KG 온톨로지 기반 슬롯 조립 시스템.
 
-파이프라인 슬롯:
-  Input → [Encoder] → [Decomposer?] → [Backbone × RegimeGate?] → [Constraint?] → Output
-                                                                        ↑
-                                                                    [Loss]
+파이프라인 슬롯 (v2):
+  Input → [Normalizer?] → [Encoder] → [TemporalMixer] → [ChannelMixer?] → [Head] → [Constraint?] → Output
+                                                                                          ↑
+                                                                                      [Loss]
 
 텐서 규약:
-  Encoder:     (B, T, raw_features) → (B, T, d_model)
-  Decomposer:  (B, T, d_model) → List[(B, T, d_model)]
-  Backbone:    (B, T, d_model) → (B, H, 1)  where H = prediction_length
-  RegimeGate:  Backbone wrapper, 동일 시그니처
-  Constraint:  (B, H, 1) → (B, H, 1)  output post-processing
-  Loss:        (pred, target) → scalar
+  Normalizer:    (B, T, C) → (B, T, C), has_reverse
+  Encoder:       (B, T, C) → (B, T, d_model) or (B, n_patch, d_model)
+  TemporalMixer: (B, T|n_patch, d_model) → (B, H, d_model)
+  ChannelMixer:  (B, H, d_model) → (B, H, d_model)
+  Head:          (B, H, d_model) → (B, H, output_dim)
+  Constraint:    (B, H, output_dim) → (B, H, output_dim)
+  Loss:          (pred, target) → scalar
 """

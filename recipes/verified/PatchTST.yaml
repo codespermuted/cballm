@@ -1,0 +1,34 @@
+name: PatchTST
+source: "Nie et al., 2023 (ICLR)"
+setting: [M, MS, S]
+channel_independent: true
+
+blocks:
+  normalizer: RevIN
+  encoder: PatchEmbedding
+  temporal_mixer: PatchAttentionMix
+  channel_mixer: null
+  head: LinearHead
+
+encoder_config:
+  patch_len: 16
+  stride: 8
+
+temporal_mixer_config:
+  n_heads: 4
+  n_layers: 3
+
+hp:
+  lr: 1.0e-4
+  epochs: 100
+  patience: 20
+  weight_decay: 1.0e-5
+
+benchmark:
+  ETTh1: 0.370
+  ETTh2: 0.302
+  Weather: 0.149
+  ECL: 0.181
+
+best_for: [large_data, long_sequence, complex_patterns]
+notes: "lookback=336~512에서 더 좋음. self-supervised pre-training 가능."

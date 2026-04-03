@@ -1,0 +1,28 @@
+name: TimesNet_style
+source: "Wu et al., 2023 (ICLR)"
+setting: [M, MS, S]
+channel_independent: true
+
+blocks:
+  normalizer: RevIN
+  encoder: LinearProjection
+  temporal_mixer: ConvMix
+  channel_mixer: null
+  head: LinearHead
+
+temporal_mixer_config:
+  kernel_size: 7
+  n_layers: 2
+  dilation: exponential
+
+hp:
+  lr: 5.0e-4
+  epochs: 100
+  patience: 15
+  weight_decay: 1.0e-5
+
+benchmark:
+  ETTh1: 0.384
+  Weather: 0.172
+
+best_for: [multi_task, local_patterns, stable_training]

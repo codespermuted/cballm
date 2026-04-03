@@ -1,0 +1,289 @@
+# CBALLM v2 Block Catalog — Single Source of Truth
+# 모든 블록 정의는 이 파일에만 존재한다.
+
+normalizer:
+  RevIN:
+    source: "Kim et al., 2022 (ICLR)"
+    primitive: instance_norm
+    shape: "(B,T,C) → (B,T,C)"
+    has_reverse: true
+    trainable_params: "2C (affine γ, β)"
+    config:
+      affine: {type: bool, default: true, desc: "학습 가능한 scale/shift"}
+      subtract_last: {type: bool, default: false, desc: "mean 대신 마지막 값 빼기. strong trend 시 true"}
+    use_conditions:
+      - "is_stationary == false"
+    stacks_with: DatasetNorm
+    conflicts_with: [RobustScaler]
+    prior_hint: "PatchTST, TSMixer, iTransformer 표준 구성요소. non-stationary에서 5-15% 개선."
+    reverse_note: "output_dim < n_features일 때 reverse는 target_idx 채널의 mean/std만 사용. Builder가 target_idx를 전달해야 함."
+
+  RobustScaler:
+    source: "sklearn"
+    primitive: statistical_norm
+    shape: "(B,T,C) → (B,T,C)"
+    has_reverse: true
+    config:
+      quantile_range: {type: list, default: [25.0, 75.0]}
+    use_conditions:
+      - "outlier_ratio > 0.05"
+    avoid_when: "이상치 적으면 RevIN으로 충분"
+    stacks_with: DatasetNorm
+    conflicts_with: [RevIN]
+
+  DatasetNorm:
+    source: "built-in"
+    primitive: statistical_norm
+    shape: "(B,T,C) → (B,T,C)"
+    has_reverse: true
+    is_trainer_builtin: true
+    always_applied: true
+    note: "항상 적용. RevIN/RobustScaler는 DatasetNorm 위에서 instance-level 추가 정규화로 동작."
+    stacks_with: [RevIN, RobustScaler]
+
+encoder:
+  LinearProjection:
+    source: "DLinear (Zeng et al., 2023)"
+    primitive: Linear
+    shape: "(B,T,C) → (B,T,d_model)"
+    params: "C × d_model"
+    capacity: minimal
+    config:
+      d_model: {type: int, range: [16, 256], default: 64, desc: "C≤7이면 32~64, C>20이면 128~256"}
+    use_conditions:
+      - "default: true"
+    note: "기본값. 확신 없으면 이것."
+
+  PatchEmbedding:
+    source: "PatchTST (Nie et al., 2023, ICLR)"
+    primitive: Convolution
+    shape: "(B,T,C) → (B,n_patch,d_model)"
+    params: "C × patch_len × d_model"
+    capacity: low
+    config:
+      d_model: {type: int, range: [32, 256], default: 128}
+      patch_len: {type: int, range: [8, 64], default: 16, desc: "dominant_period의 1/4~1/2 권장"}
+      stride: {type: int, range: [4, 32], default: 8, desc: "patch_len의 1/2"}
+    use_conditions:
+      - "seq_len >= 96"
+    avoid_when: "seq_len < 64, downstream Patch 전용 Mixer 없을 때"
+    prior_hint: "PatchTST 핵심 혁신. patch_len=16, stride=8이 범용적."
+    shape_constraint: "후속 TemporalMixer가 PatchMLPMix 또는 PatchAttentionMix여야 함"
+
+  FourierEmbedding:
+    source: "FEDformer (Zhou et al., 2022)"
+    primitive: Fourier
+    shape: "(B,T,C) → (B,T,d_model)"
+    capacity: low
+    config:
+      d_model: {type: int, range: [16, 256], default: 64}
+      n_harmonics: {type: int, range: [1, 20], default: 3, desc: "ACF>0.7인 주기 수에 맞추기"}
+      learnable_freq: {type: bool, default: false}
+    use_conditions:
+      - "has_strong_seasonality == true"
+    avoid_when: "주기성 약한 데이터 (max ACF<0.5)"
+
+temporal_mixer:
+  LinearMix:
+    source: "DLinear (Zeng et al., 2023, AAAI)"
+    primitive: Linear
+    shape: "(B,T,d_model) → (B,H,d_model)"
+    capacity: minimal
+    min_data: 500
+    config:
+      channel_independent: {type: bool, default: true}
+    use_conditions:
+      - "default_baseline: true"
+    prior_hint: "DLinear 논문 핵심 — 단순 Linear가 Transformer 이김. 반드시 baseline 확보 후 복잡한 모델."
+
+  MLPMix:
+    source: "TSMixer TMix-Only (Chen et al., 2023)"
+    primitive: MLP
+    shape: "(B,T,d_model) → (B,H,d_model)"
+    capacity: low
+    min_data: 2000
+    config:
+      hidden_dim: {type: int, range: [64, 512], default: 256}
+      dropout: {type: float, range: [0, 0.5], default: 0.1}
+      activation: {type: str, default: "GELU"}
+      n_layers: {type: int, range: [1, 3], default: 1}
+    use_conditions:
+      - "n_rows >= 2000"
+      - "linear_baseline_tested == true"
+
+  GatedMLPMix:
+    source: "TSMixer IC (Ekambaram et al., 2023, KDD)"
+    primitive: "MLP + Gating"
+    shape: "(B,T,d_model) → (B,H,d_model)"
+    capacity: medium
+    min_data: 5000
+    config:
+      hidden_dim: {type: int, range: [64, 512], default: 256}
+      dropout: {type: float, default: 0.1}
+    use_conditions:
+      - "n_features > 10"
+      - "n_rows >= 5000"
+    avoid_when: "feature ≤7이면 gating 오버헤드 불필요"
+
+  PatchMLPMix:
+    source: "TSMixer CI (Chen et al., 2023)"
+    primitive: MLP
+    shape: "(B,n_patch,d_model) → (B,H,d_model)"
+    capacity: medium
+    min_data: 5000
+    config:
+      hidden_dim: {type: int, range: [64, 512], default: 256}
+      dropout: {type: float, default: 0.1}
+    use_conditions:
+      - "encoder == PatchEmbedding"
+      - "n_rows >= 5000"
+    requires_encoder: PatchEmbedding
+
+  AttentionMix:
+    source: "Vanilla Transformer"
+    primitive: Attention
+    shape: "(B,T,d_model) → (B,H,d_model)"
+    capacity: high
+    min_data: 10000
+    config:
+      n_heads: {type: int, range: [2, 16], default: 4}
+      n_layers: {type: int, range: [1, 6], default: 2}
+      d_ff: {type: int, range: [64, 1024], default: 256}
+      dropout: {type: float, default: 0.1}
+    use_conditions:
+      - "n_rows >= 10000"
+    avoid_when: "<10000행, smooth 시계열, 실시간 추론"
+
+  PatchAttentionMix:
+    source: "PatchTST (Nie et al., 2023, ICLR)"
+    primitive: Attention
+    shape: "(B,n_patch,d_model) → (B,H,d_model)"
+    capacity: high
+    min_data: 10000
+    config:
+      n_heads: {type: int, range: [2, 16], default: 4}
+      n_layers: {type: int, range: [1, 6], default: 3}
+      d_ff: {type: int, range: [64, 1024], default: 256}
+      dropout: {type: float, default: 0.1}
+      positional_encoding: {type: str, options: [sinusoidal, learnable, none], default: learnable}
+    use_conditions:
+      - "encoder == PatchEmbedding"
+      - "n_rows >= 10000"
+    requires_encoder: PatchEmbedding
+    prior_hint: "PatchTST 핵심. learnable PE > sinusoidal. n_layers=3 표준."
+
+  ConvMix:
+    source: "TimesNet (Wu et al., 2023, ICLR)"
+    primitive: Convolution
+    shape: "(B,T,d_model) → (B,H,d_model)"
+    capacity: medium
+    min_data: 3000
+    config:
+      kernel_size: {type: int, range: [3, 25], default: 7, desc: "홀수만"}
+      n_layers: {type: int, range: [1, 4], default: 2}
+      dilation: {type: str, options: [none, exponential], default: exponential}
+      dropout: {type: float, default: 0.1}
+    use_conditions:
+      - "n_rows >= 3000"
+    avoid_when: "global dependency만 중요한 smooth 시계열"
+
+  RecurrentMix:
+    source: "DeepAR (Salinas et al., 2020)"
+    primitive: Recurrence
+    shape: "(B,T,d_model) → (B,H,d_model)"
+    capacity: medium
+    min_data: 2000
+    config:
+      cell_type: {type: str, options: [LSTM, GRU], default: GRU}
+      hidden_dim: {type: int, range: [32, 256], default: 128}
+      n_layers: {type: int, range: [1, 3], default: 2}
+      dropout: {type: float, default: 0.1}
+    avoid_when: "seq_len>200, 대규모 데이터"
+
+channel_mixer:
+  None:
+    use_when: "기본값. 변수간 상관 약할 때 (max|r|<0.5), C≤7"
+    prior_hint: "PatchTST — channel-independent가 dependent보다 나은 경우 많음"
+
+  FeatureMLPMix:
+    source: "TSMixer IC (Ekambaram et al., 2023)"
+    primitive: MLP
+    shape: "(B,H,d_model) → (B,H,d_model)"
+    config:
+      hidden_dim: {type: int, range: [32, 256], default: 64}
+      dropout: {type: float, default: 0.1}
+    use_conditions:
+      - "high_cross_corr_pairs >= 3"
+    avoid_when: "상관 약하면 noise만 추가"
+
+  InvertedAttentionMix:
+    source: "iTransformer (Liu et al., 2024, ICLR)"
+    primitive: "Attention (변수축)"
+    shape: "(B,H,d_model) → (B,H,d_model)"
+    config:
+      n_heads: {type: int, range: [2, 8], default: 4}
+      n_layers: {type: int, range: [1, 3], default: 2}
+      dropout: {type: float, default: 0.1}
+    use_conditions:
+      - "n_features > 10"
+      - "n_rows >= 10000"
+      - "high_cross_corr_pairs >= 5"
+    avoid_when: "C≤10, 데이터 부족"
+    prior_hint: "TSLib 장기예측 1위 (2024.03). Traffic MSE=0.395."
+
+head:
+  LinearHead:
+    shape: "(B,H,d_model) → (B,H,output_dim)"
+    config:
+      output_dim: {type: int, default: 1, desc: "S/MS=1, M=C 또는 1(channel-independent)"}
+    note: "기본값. head에서 복잡도 높이는 것은 거의 효과 없음."
+
+  FlattenLinearHead:
+    shape: "(B,H,d_model) → (B,H,output_dim)"
+    params: "H × d_model × output_dim"
+    note: "NHITS/NBEATS 스타일"
+
+constraint:
+  Positivity:
+    use_conditions:
+      - "can_be_negative == false"
+      - "target_min >= 0"
+    prior_hint: "Softplus > ReLU (gradient 안정)"
+
+  Clamp:
+    config:
+      min_val: {type: float}
+      max_val: {type: float}
+    use_conditions:
+      - "known_physical_bounds == true"
+
+  Smoothness:
+    config:
+      alpha: {type: float, range: [0.01, 1.0], default: 0.1}
+    avoid_when: "spike/change point가 중요할 때"
+
+loss:
+  MAE:
+    note: "기본값. 이상치에 강건. 확신 없으면 MAE."
+
+  MSE:
+    note: "큰 오차 강하게 페널티. 이상치 많으면 불리."
+
+  Huber:
+    config:
+      delta: {type: float, range: [0.1, 10.0], default: 1.0}
+    use_conditions:
+      - "target_skew > 1.5"
+
+  QuantileLoss:
+    config:
+      quantile: {type: float, range: [0.01, 0.99], default: 0.5}
+    use_when: "확률적 예측, prediction interval 필요"
+
+  AsymmetricLoss:
+    config:
+      over_weight: {type: float, range: [0.5, 5.0], default: 1.0}
+      under_weight: {type: float, range: [0.5, 5.0], default: 2.0}
+    use_conditions:
+      - "extreme_ratio > 2.0"
+    prior_hint: "under_weight = extreme_ratio로 설정하면 직관적"

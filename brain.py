@@ -1,4 +1,4 @@
-"""Brain — 오케스트레이터. 워커들을 조율하여 예측 파이프라인을 실행한다."""
+"""Brain — 오케스트레이터 (v2). KG Matcher 추가, 파이프라인 재구성."""
 from __future__ import annotations
 
 import json
@@ -7,36 +7,38 @@ from pathlib import Path
 from cballm.engine import chat
 from cballm.session import WorkerSession
 from cballm.workers.scout import Scout
-from cballm.workers.engineer import Engineer
+from cballm.workers.kg_matcher import KGMatcher
 from cballm.workers.architect import Architect
+from cballm.features.engineer import Engineer
 from cballm.workers.trainer import Trainer
 from cballm.workers.critic import Critic
 
 MAX_ITERATIONS = 3
 
 ORCHESTRATOR_PROMPT = """\
-You are CBALLM Brain, an AI data science orchestrator.
-You manage 5 specialist workers to build the best forecasting model.
+You are CBALLM Brain v2, an AI data science orchestrator.
+You manage 6 specialist workers to build the best forecasting model.
 
 Workers:
-- Scout: data profiling and EDA
-- Engineer: feature engineering
-- Architect: model selection and strategy
-- Trainer: model training execution
-- Critic: result analysis and feedback
+- Scout: rule-based data profiling and EDA
+- KG Matcher: rule-based profile → KG query → candidate recipes/combinations
+- Architect: LLM decision protocol (KG-bounded)
+- Engineer: rule-based feature engineering + leakage verification
+- Trainer: deterministic training execution
+- Critic: rule-based evaluation + feedback routing
 
-Your job is to:
-1. Understand the user's request
-2. Route tasks to the right workers in order
-3. Pass results between workers
-4. Summarize the final outcome
+Pipeline: Scout → KG Matcher → [Architect → Engineer → Trainer → Critic] × N
 
-You do NOT do the work yourself. You delegate and coordinate.
+Critic feedback types:
+- DONE: finalize results
+- RETRY_HP: adjust hyperparameters (Architect Step 2-6)
+- RETRY_RECIPE: try different recipe (Architect Step 1)
+- RETRY_BLOCK: swap block via KG query
 """
 
 
 def load_rules(rules_dir: str) -> dict[str, str]:
-    """rules/ 디렉토리에서 모든 .md 파일을 로드. 파일명 → 내용 딕셔너리 반환."""
+    """rules/ 디렉토리에서 모든 .md 파일을 로드."""
     rules_path = Path(rules_dir)
     if not rules_path.exists():
         return {}
@@ -47,16 +49,14 @@ def load_rules(rules_dir: str) -> dict[str, str]:
 
 
 def extract_worker_rules(all_rules: dict[str, str], worker_name: str) -> str:
-    """전체 룰에서 해당 워커에 관련된 섹션만 추출한다. 컨텍스트 절약."""
+    """전체 룰에서 해당 워커에 관련된 섹션만 추출."""
     parts = []
 
-    # 도메인 룰 (energy.md 등) — 항상 전부 포함 (짧음)
     for name, content in all_rules.items():
         if name == "general":
-            continue  # general은 섹션별로 추출
+            continue
         parts.append(content)
 
-    # general.md에서 워커별 섹션 추출
     general = all_rules.get("general", "")
     if general:
         section_map = {
@@ -68,7 +68,6 @@ def extract_worker_rules(all_rules: dict[str, str], worker_name: str) -> str:
         }
         keywords = section_map.get(worker_name, [])
         if keywords:
-            # 해당 섹션의 내용만 추출
             lines = general.split("\n")
             capturing = False
             section_lines = []
@@ -76,7 +75,6 @@ def extract_worker_rules(all_rules: dict[str, str], worker_name: str) -> str:
                 if any(kw in line for kw in keywords):
                     capturing = True
                 elif line.startswith("## ") and capturing:
-                    # 다음 대섹션 시작 → 중단
                     if not any(kw in line for kw in keywords):
                         capturing = False
                 if capturing:
@@ -84,18 +82,15 @@ def extract_worker_rules(all_rules: dict[str, str], worker_name: str) -> str:
             if section_lines:
                 parts.append("\n".join(section_lines))
 
-        # 7. 업계 표준 — 모든 워커에게 요약만
-        if "7." in general:
-            idx = general.find("## 7.")
-            if idx >= 0:
-                summary = general[idx:idx+1500]  # 처음 1500자만
-                parts.append(summary)
-
     return "\n\n".join(parts) if parts else ""
 
 
 class Brain:
-    """오케스트레이터. 워커들을 순서대로 호출하며 파이프라인을 실행한다."""
+    """오케스트레이터 (v2).
+
+    v2 파이프라인:
+    Scout → KG Matcher → [Architect → Engineer → Builder → Trainer → Critic] × N
+    """
 
     def __init__(self, cwd: str, rules_dir: str = "", benchmark_mode: bool = False):
         self.cwd = cwd
@@ -108,104 +103,111 @@ class Brain:
         self.log: list[dict] = []
 
     def _rules_for(self, worker_name: str) -> str:
-        """워커에 해당하는 룰 섹션만 추출."""
         return extract_worker_rules(self.all_rules, worker_name)
 
     def run_pipeline(self, data_path: str, target_col: str = "target",
                      prediction_length: int = 24, user_instructions: str = "") -> dict:
-        """전체 예측 파이프라인을 실행한다."""
-        print("🧠 CBALLM Brain — 파이프라인 시작")
-        print(f"   데이터: {data_path}")
-        print(f"   타겟: {target_col}, 예측 길이: {prediction_length}")
+        """v2 파이프라인 실행."""
+        print("CBALLM Brain v2 -- pipeline start")
+        print(f"   Data: {data_path}")
+        print(f"   Target: {target_col}, Horizon: {prediction_length}")
         if user_instructions:
-            print(f"   지시사항: {user_instructions}")
+            print(f"   Instructions: {user_instructions}")
         print()
 
-        context = {
+        context: dict = {
             "data_path": data_path,
             "target_col": target_col,
             "prediction_length": prediction_length,
             "user_instructions": user_instructions,
         }
 
-        # ── 공통 계약 (모든 워커에 전달) ──
-        from pathlib import Path
+        # 공통 계약
         data_stem = Path(data_path).stem
         feature_path = f"{self.cwd}/benchmark_data/{data_stem}_features.parquet"
         results_path = f"{self.cwd}/benchmark_data/{data_stem}_results.json"
 
         contract = (
-            f"[공통 계약 — 반드시 준수]\n"
+            f"[Contract]\n"
             f"DATA_PATH = '{data_path}'\n"
             f"TARGET_COL = '{target_col}'\n"
             f"PREDICTION_LENGTH = {prediction_length}\n"
             f"FEATURE_OUTPUT_PATH = '{feature_path}'\n"
             f"RESULTS_OUTPUT_PATH = '{results_path}'\n"
-            f"코드에서 위 변수명을 그대로 사용할 것. 경로·컬럼명 추측 금지.\n"
-            f"코드 시작부에 반드시 위 변수를 정의하고 사용할 것.\n"
         )
 
-        # ── Step 1: Scout (rule-based, LLM 불필요) ──
-        print(f"  🔍 [scout] 프로파일링 중... (rule-based)")
+        # ── Step 1: Scout (rule-based) ──
+        print(f"  [scout] Profiling... (rule-based)")
         scout = Scout(self.cwd)
-        scout_task = f"{contract}\n"
-        scout_result = scout.run(scout_task)
+        scout_result = scout.run(f"{contract}\n")
         self.log.append(scout_result)
         context["profile"] = scout_result.get("execution_result") or scout_result["response"]
-        print(f"     ✓ 프로파일 완료")
+        print(f"     done")
+
+        # ── Step 2: KG Matcher (rule-based) ──
+        print(f"  [kg_matcher] Matching... (rule-based)")
+        kg_matcher = KGMatcher(self.cwd)
+        kg_task = (
+            f"{contract}\n"
+            f"Scout Profile:\n{context['profile']}\n"
+        )
+        kg_result = kg_matcher.run(kg_task)
+        self.log.append(kg_result)
+        context["kg_match"] = kg_result.get("execution_result") or kg_result["response"]
+        print(f"     done")
 
         # ── Iteration Loop ──
+        verdict = {}
         for iteration in range(1, MAX_ITERATIONS + 1):
             print(f"\n{'='*60}")
-            print(f"  🔄 Iteration {iteration}/{MAX_ITERATIONS}")
+            print(f"  Iteration {iteration}/{MAX_ITERATIONS}")
             print(f"{'='*60}\n")
 
-            # ── Step 2: Engineer (rule-based, LLM 불필요) ──
-            print(f"  🔧 [engineer] 피쳐 생성 중... (rule-based)")
+            # ── Step 3: Architect (LLM Decision Protocol) ──
+            architect_task = (
+                f"Scout Profile:\n{context['profile']}\n\n"
+                f"KG Matcher Result:\n{context['kg_match']}\n\n"
+                f"PREDICTION_LENGTH = {prediction_length}\n"
+            )
+
+            if context.get("prev_configs"):
+                architect_task += "\nPrevious iterations:\n"
+                for prev in context["prev_configs"]:
+                    architect_task += f"  - {prev['config']} -> norm_MSE={prev['norm_mse']}\n"
+
+            if context.get("critic_feedback"):
+                architect_task += f"\nCritic feedback:\n{context['critic_feedback']}\n"
+
+            print(f"  [architect] Decision Protocol...")
+            architect = Architect(self.cwd)
+            architect_result = architect.run(architect_task)
+            self.log.append(architect_result)
+
+            config_json = architect_result["response"]
+            context["config"] = config_json
+
+            if architect_result.get("execution_result"):
+                for line in architect_result["execution_result"].split("\n"):
+                    if line.startswith("  ->"):
+                        print(f"     {line}")
+            print(f"     config: {config_json[:200]}")
+
+            # ── Step 4: Engineer (rule-based) ──
+            print(f"  [engineer] Feature engineering... (rule-based)")
             engineer_task = (
                 f"{contract}\n"
-                f"Scout 프로파일:\n{context['profile']}\n"
+                f"Scout Profile:\n{context['profile']}\n"
             )
             engineer = Engineer(self.cwd)
             engineer_result = engineer.run(engineer_task)
             self.log.append(engineer_result)
             context["features"] = engineer_result.get("execution_result") or engineer_result["response"]
-            print(f"     ✓ 피쳐 생성 완료")
+            print(f"     done")
 
-            # ── Step 3: Architect (Decision Protocol) ──
-            architect_task = (
-                f"Scout 프로파일:\n{context['profile']}\n"
-                f"예측 길이: {prediction_length}\n"
-            )
-
-            if context.get("prev_configs"):
-                architect_task += "\n이전 iteration 결과:\n"
-                for prev in context["prev_configs"]:
-                    architect_task += f"  - {prev['config']} → norm_MSE={prev['norm_mse']}\n"
-
-            if context.get("critic_suggestions"):
-                architect_task += f"\nCritic 피드백:\n{context['critic_suggestions']}\n"
-
-            print(f"  🏗️ [architect] Decision Protocol 실행 중...")
-            architect = Architect(self.cwd)
-            architect_result = architect.run(architect_task)
-            self.log.append(architect_result)
-
-            config_json = architect_result["response"]  # 이미 JSON 문자열
-            context["config"] = config_json
-
-            # 모델링 리포트 출력
-            if architect_result.get("execution_result"):
-                for line in architect_result["execution_result"].split("\n"):
-                    if line.startswith("  →"):
-                        print(f"     {line}")
-            print(f"     📋 config: {config_json[:200]}")
-
-            # ── Step 4: Trainer (템플릿 실행기, LLM 불필요) ──
-            # Engineer가 피쳐 파일을 생성했으면 그걸 사용, 아니면 원본
+            # ── Step 5: Trainer (deterministic) ──
             train_data_path = feature_path if Path(feature_path).exists() else data_path
             if train_data_path != data_path:
-                print(f"     📂 Engineer 피쳐 사용: {train_data_path}")
+                print(f"     Using feature file: {train_data_path}")
 
             trainer_contract = (
                 f"DATA_PATH = '{train_data_path}'\n"
@@ -214,87 +216,97 @@ class Brain:
             )
             trainer_task = (
                 f"{trainer_contract}\n"
-                f"Architect 설계:\n{config_json}\n"
+                f"Architect Config:\n{config_json}\n"
             )
 
             mode_label = "benchmark" if self.benchmark_mode else "CV"
-            print(f"  🏋️ [trainer] 학습 중... ({mode_label} mode)")
+            print(f"  [trainer] Training... ({mode_label} mode)")
             trainer = Trainer(self.cwd, benchmark_mode=self.benchmark_mode)
             trainer_result = trainer.run(trainer_task)
             self.log.append(trainer_result)
 
             context["training_result"] = trainer_result.get("execution_result") or trainer_result["response"]
-            print(f"     ✓ 학습 완료")
+            print(f"     done")
 
-            # ── Step 5: Critic (rule-based, LLM 불필요) ──
+            # ── Step 6: Critic (rule-based) ──
             critic_task = (
-                f"학습 결과:\n{context['training_result'][:2000]}\n\n"
+                f"Training result:\n{context['training_result'][:2000]}\n\n"
                 f"Iteration: {iteration}/{MAX_ITERATIONS}\n"
             )
 
-            print(f"  📊 [critic] 판정 중... (rule-based)")
+            print(f"  [critic] Judging... (rule-based)")
             prev_mae = context.get("prev_mae")
             critic = Critic(self.cwd, prev_mae=prev_mae)
             critic_result = critic.run(critic_task)
             self.log.append(critic_result)
 
-            # Critic 결과는 이미 structured JSON
             verdict = json.loads(critic_result["response"])
-            critic_summary = json.dumps(verdict, ensure_ascii=False)
-            print(f"     ✓ 판정: {verdict['verdict']} | MAE: {verdict.get('best_metric', {}).get('MAE', 'N/A')}")
+            print(f"     verdict: {verdict['verdict']} | MAE: {verdict.get('best_metric', {}).get('MAE', 'N/A')}")
 
-            context["critic_suggestions"] = "\n".join(verdict.get("suggestions", []))
+            # 피드백 구성
+            feedback_parts = []
+            if verdict.get("suggestions"):
+                feedback_parts.extend(verdict["suggestions"])
+            feedback_parts.append(f"verdict: {verdict['verdict']}")
+            if verdict.get("analysis"):
+                feedback_parts.append(f"analysis: {verdict['analysis']}")
+            context["critic_feedback"] = "\n".join(feedback_parts)
 
-            # 이전 config + 결과 기록 (Architect 피드백용)
+            # 이전 config 기록
             norm_mse = verdict.get("best_metric", {}).get("norm_MSE", "N/A")
             try:
                 parsed = json.loads(config_json)
                 config_summary = json.dumps({
                     k: v.get("type") if isinstance(v, dict) else v
-                    for k, v in parsed.items() if k != "reasoning"
+                    for k, v in parsed.items()
+                    if k not in ("preprocessing", "input_design", "training", "_recipe_name")
                 }, ensure_ascii=False)
             except (json.JSONDecodeError, AttributeError):
                 config_summary = config_json[:100]
+
+            try:
+                recipe_name = json.loads(config_json).get("_recipe_name", "custom")
+            except Exception:
+                recipe_name = "custom"
+
             context.setdefault("prev_configs", []).append({
                 "config": config_summary,
                 "norm_mse": norm_mse,
+                "recipe_name": recipe_name,
             })
 
-            # 다음 iteration 비교용 MAE 저장
+            # MAE 저장
             current_mae = verdict.get("best_metric", {}).get("MAE")
             if current_mae is not None:
                 context["prev_mae"] = current_mae
 
-            if verdict.get("verdict") == "DONE" or iteration == MAX_ITERATIONS:
+            # ── 분기 판단 ──
+            v = verdict.get("verdict", "")
+            if v == "DONE" or iteration == MAX_ITERATIONS:
                 print(f"\n{'='*60}")
-                print(f"  ✅ 파이프라인 완료 (iteration {iteration})")
+                print(f"  Pipeline completed (iteration {iteration})")
                 print(f"{'='*60}\n")
                 return self._build_final_report(context, verdict, iteration)
 
-            print(f"\n  🔄 Critic: {verdict.get('verdict', 'RETRY')} — 다음 iteration으로")
+            # RETRY_BLOCK: KG에 대체 블록 쿼리
+            if v == "RETRY_BLOCK":
+                print(f"\n  RETRY_BLOCK: querying KG for replacement blocks...")
+                # KG Matcher를 다시 실행하여 업데이트된 후보 제공
+                kg_task_retry = (
+                    f"{contract}\n"
+                    f"Scout Profile:\n{context['profile']}\n"
+                    f"Current config failed blocks:\n{config_json}\n"
+                    f"Critic: {context['critic_feedback']}\n"
+                )
+                kg_retry_result = kg_matcher.run(kg_task_retry)
+                context["kg_match"] = kg_retry_result.get("execution_result") or kg_retry_result["response"]
+                self.log.append(kg_retry_result)
+
+            print(f"\n  {v} -> next iteration")
 
         return self._build_final_report(context, verdict, MAX_ITERATIONS)
 
-    def _run_worker(self, worker, task: str) -> dict:
-        """워커를 실행하고 로그에 기록한다."""
-        model_label = "Coder" if worker.model_profile == "code" else "Qwopus"
-        print(f"  🔧 [{worker.name}] 작업 중... (모델: {model_label})")
-        result = worker.run(task)
-
-        # 요약 출력
-        response_preview = result["response"][:200].replace("\n", " ")
-        print(f"     ✓ 응답: {response_preview}...")
-        if result.get("execution_result"):
-            exec_preview = result["execution_result"][:150].replace("\n", " ")
-            print(f"     ✓ 실행: {exec_preview}...")
-
-        self.log.append(result)
-        return result
-
-    # _parse_critic_verdict 제거됨 — Critic이 이제 structured JSON을 직접 반환
-
     def _build_final_report(self, context: dict, verdict: dict, iterations: int) -> dict:
-        """최종 리포트를 구성한다."""
         return {
             "status": "completed",
             "iterations": iterations,

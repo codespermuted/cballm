@@ -1,0 +1,77 @@
+# CBALLM v2 Compatibility Rules (KG 호환성)
+# Builder가 조립 전에 검증하는 hard/soft constraints
+
+shape_rules:
+  # PatchEmbedding 출력 shape이 다름 → 전용 Mixer만 가능
+  - encoder: PatchEmbedding
+    compatible_mixers: [PatchMLPMix, PatchAttentionMix]
+    incompatible_mixers: [LinearMix, MLPMix, GatedMLPMix, AttentionMix, ConvMix, RecurrentMix]
+    reason: "PatchEmbed 출력이 (B,n_patch,d_model). 비-Patch Mixer는 (B,T,d_model) 기대."
+
+  # 비-Patch Encoder → 비-Patch Mixer만
+  - encoder: [LinearProjection, FourierEmbedding]
+    compatible_mixers: [LinearMix, MLPMix, GatedMLPMix, AttentionMix, ConvMix, RecurrentMix]
+    incompatible_mixers: [PatchMLPMix, PatchAttentionMix]
+    reason: "비-Patch Encoder 출력이 (B,T,d_model). Patch Mixer는 (B,n_patch,d_model) 기대."
+
+normalizer_rules:
+  # DatasetNorm은 항상 적용 (train mean/std). 벤치마크 비교 기준 스케일.
+  - rule: "Trainer.dataset_norm = always"
+    reason: "논문 표준. DatasetNorm 없으면 메트릭이 raw scale."
+
+  # RevIN/RobustScaler는 DatasetNorm 위에서 instance-level 추가 정규화
+  - if: "normalizer == RevIN"
+    then: "DatasetNorm + RevIN 중첩"
+    reason: "PatchTST, iTransformer 등 논문 표준"
+
+  - if: "normalizer == RobustScaler"
+    then: "DatasetNorm + RobustScaler 중첩"
+
+  - mutual_exclusive: [RevIN, RobustScaler]
+    reason: "instance-level 정규화는 하나만. DatasetNorm과는 중첩 가능."
+
+  # RevIN reverse target_idx
+  - if: "normalizer == RevIN AND output_dim < n_features"
+    then: "Builder가 target_idx를 전달. reverse 시 해당 채널의 mean/std만 사용."
+    reason: "MS/S setting에서 잘못된 target_idx는 결과 오염."
+
+head_rules:
+  - head: ReconcileHead
+    requires: "channel_mixer != null"
+    reason: "reconciliation은 channel mixing 결과가 있어야 의미"
+
+capacity_rules:
+  - block: [AttentionMix, PatchAttentionMix, InvertedAttentionMix]
+    condition: "n_rows < 10000"
+    action: warn
+    message: "Attention 블록은 10000행 이상 권장. 과적합 위험."
+
+  - block: [PatchMLPMix, GatedMLPMix, ConvMix]
+    condition: "n_rows < 5000"
+    action: warn
+    message: "Medium capacity 블록은 5000행 이상 권장."
+
+forecasting_setting_compatibility:
+  S:
+    head_output_dim: 1
+    channel_mixer: null
+    channel_independent: true
+    encoder_input_dim: 1
+
+  MS:
+    head_output_dim: 1
+    channel_mixer: optional
+    channel_independent:
+      recommended: false
+      note: "true로 하면 타겟 변수만 독립 처리 → 외생변수 무시됨"
+    encoder_input_dim: C
+    loss_target: "타겟 변수 1개에 대해서만 계산"
+
+  M:
+    head_output_dim: C
+    channel_mixer: recommended
+    channel_independent:
+      true: "PatchTST 방식 — 각 변수 독립 예측, weight 공유"
+      false: "iTransformer 방식 — 변수 간 attention/mixing"
+    encoder_input_dim: C
+    loss_target: "C개 변수 전체에 대해 평균 loss"

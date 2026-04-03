@@ -1,0 +1,57 @@
+# Feature Engineering Templates
+# Engineer가 사용하는 rule-based 피쳐 생성 템플릿. 모든 템플릿에 leakage 방지 규칙 내장.
+
+calendar_features:
+  type: known_covariate
+  when: "datetime 컬럼 존재"
+  features:
+    - "hour_sin = sin(2π·hour/24), hour_cos = cos(2π·hour/24)"
+    - "dow_sin = sin(2π·dayofweek/7), dow_cos = cos(2π·dayofweek/7)"
+    - "month_sin = sin(2π·month/12), month_cos = cos(2π·month/12)"
+    - "is_weekend = (dayofweek >= 5)"
+  shift_required: false
+  leakage_safe: true
+  note: "pred_len이 길수록 이 feature의 상대적 가치가 커짐"
+
+lag_features:
+  type: unknown_covariate
+  when: "Scout에서 유의미한 ACF lag가 있을 때"
+  selection_rule: |
+    1. Scout의 ACF 분석에서 ACF > 0.3인 lag 후보 추출
+    2. 후보 중 k >= pred_len인 것만 남김 (LEAK-003)
+    3. pred_len 자체도 항상 lag 후보에 포함
+  implementation: "target_lag_k = target.shift(k)  # k >= pred_len"
+  shift_required: true
+  leakage_safe: "k >= pred_len일 때만"
+  common_patterns:
+    hourly_data: "pred_len=96 → lag_96, lag_168, lag_336"
+    daily_data: "pred_len=7 → lag_7, lag_14, lag_30"
+
+rolling_features:
+  type: unknown_covariate
+  when: "Scout에서 계절성 감지 또는 변동성 분석 필요"
+  selection_rule: |
+    1. window 크기: seasonality에서 ACF > 0.5인 주기에 해당하는 window
+    2. 모든 rolling 결과에 .shift(pred_len) 적용 (LEAK-003)
+  features:
+    - "rolling_mean_{w} = target.rolling(w).mean().shift(pred_len)"
+    - "rolling_std_{w} = target.rolling(w).std().shift(pred_len)"
+  shift_required: true
+  leakage_safe: "shift(pred_len) 적용 시에만"
+
+exogenous_features:
+  type: "판단 필요 — known인지 unknown인지 구분 필수"
+  when: "외생변수 존재"
+  classification_rule: |
+    Q: "예측 시점 t에서 이 변수의 t+1 ~ t+pred_len 값을 알 수 있는가?"
+      YES → known_covariate: shift 불필요
+      NO  → unknown_covariate: shift(pred_len) 필수
+      불확실 → unknown으로 취급 (안전 우선)
+  selection_rule: "Scout의 exog_correlations에서 |r| >= 0.3인 변수 우선"
+
+leakage_verification:
+  method: "각 feature와 future_target(pred_len 후) 간 상관 계산"
+  thresholds:
+    auto_remove: 0.98
+    warn_only: 0.95
+    safe: 0.95

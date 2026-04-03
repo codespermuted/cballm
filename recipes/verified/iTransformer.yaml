@@ -1,0 +1,29 @@
+name: iTransformer
+source: "Liu et al., 2024 (ICLR)"
+setting: [M]
+channel_independent: false
+
+blocks:
+  normalizer: RevIN
+  encoder: LinearProjection
+  temporal_mixer: LinearMix
+  channel_mixer: InvertedAttentionMix
+  head: LinearHead
+
+channel_mixer_config:
+  n_heads: 4
+  n_layers: 2
+
+hp:
+  lr: 1.0e-4
+  epochs: 100
+  patience: 20
+  weight_decay: 1.0e-5
+
+benchmark:
+  ETTh2: 0.297
+  ECL: 0.148
+  Traffic: 0.395
+
+best_for: [many_features, high_cross_correlation]
+notes: "변수 많을 때 최강. 변수 적으면 DLinear과 비슷."

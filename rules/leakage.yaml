@@ -1,0 +1,36 @@
+# Data Leakage Prevention Rules
+
+rules:
+  LEAK-001:
+    description: "Temporal split only. random split 절대 금지."
+    enforcement: "Trainer 자동 적용"
+
+  LEAK-002:
+    description: "정규화 통계는 train split에서만 계산."
+    enforcement: "Trainer가 train_end 이전 데이터만 사용"
+
+  LEAK-003:
+    description: >
+      Target-derived feature: lag_k는 k≥pred_len만,
+      rolling은 .shift(pred_len) 필수.
+      known covariate만 미래값 허용.
+    enforcement: "Engineer 자동 + 사후 검증"
+
+  LEAK-004:
+    description: "Feature-future correlation check. |r|>0.98 제거, |r|>0.95 경고."
+    enforcement: "Engineer 사후 검증"
+    thresholds:
+      auto_remove: 0.98
+      warn_only: 0.95
+
+  LEAK-005:
+    description: >
+      Train-val 사이 pred_len 크기 gap.
+      val 첫 sample의 target이 train 마지막 데이터와 겹치지 않도록.
+    enforcement: "Trainer temporal_split"
+
+  LEAK-006:
+    description: >
+      MS setting에서 타겟 변수의 미래값이 외생변수 feature에 포함되지 않도록.
+      외생변수도 unknown이면 shift(pred_len).
+    enforcement: "Engineer 자동"

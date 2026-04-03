@@ -1,0 +1,22 @@
+# Evaluation Integrity Rules
+
+rules:
+  EVAL-001:
+    description: "모든 모델은 naive baseline(last-value repeat)을 이겨야 함. 미달 시 ERROR."
+    enforcement: "Critic 자동 비교"
+
+  EVAL-002:
+    description: "알려진 데이터셋은 표준 split 사용 (benchmark_mode)."
+    enforcement: "Trainer STANDARD_SPLITS"
+
+  EVAL-003:
+    description: "Normal/Extreme 분리 평가. 극단값: train 기준 상/하위 5%."
+    enforcement: "Trainer 계산, Critic 분석"
+
+  EVAL-004:
+    description: "원본 + 정규화 스케일 메트릭 동시 리포트."
+    enforcement: "Trainer 양쪽 계산"
+
+  EVAL-005:
+    description: "CV로 선택 → refit(train+val) → test 1회. 정규화 통계는 train-only 유지."
+    enforcement: "Trainer 자동"

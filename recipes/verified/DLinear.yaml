@@ -1,0 +1,26 @@
+name: DLinear
+source: "Zeng et al., 2023 (AAAI)"
+setting: [M, MS, S]
+channel_independent: true
+
+blocks:
+  normalizer: RevIN
+  encoder: LinearProjection
+  temporal_mixer: LinearMix
+  channel_mixer: null
+  head: LinearHead
+
+hp:
+  lr: 1.0e-3
+  epochs: 50
+  patience: 10
+  weight_decay: 1.0e-4
+
+benchmark:
+  ETTh1: 0.386
+  ETTh2: 0.333
+  Weather: 0.196
+  ECL: 0.197
+
+best_for: [baseline, smooth, small_data, interpretable]
+notes: "항상 첫 번째로 시도. 이것보다 나은 모델만 채택."

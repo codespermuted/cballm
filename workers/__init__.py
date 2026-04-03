@@ -1,12 +1,12 @@
 from .scout import Scout
-from .engineer import Engineer
+from .kg_matcher import KGMatcher
 from .architect import Architect
 from .trainer import Trainer
 from .critic import Critic
 
 ALL_WORKERS = {
     "scout": Scout,
-    "engineer": Engineer,
+    "kg_matcher": KGMatcher,
     "architect": Architect,
     "trainer": Trainer,
     "critic": Critic,

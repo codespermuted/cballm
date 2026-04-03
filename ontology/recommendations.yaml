@@ -1,0 +1,52 @@
+# CBALLM v2 Recommendation Rules
+# KG Matcher가 후보 생성에 사용하는 soft 규칙
+
+encoder_recommendations:
+  - condition: "max_acf_at_known_periods > 0.7"
+    recommends: FourierEmbedding
+    param_hint: "n_harmonics = count(ACF > 0.7)"
+
+  - condition: "seq_len >= 96 AND multi_scale_suspected"
+    recommends: PatchEmbedding
+    param_hint: "patch_len = dominant_period // 4"
+
+temporal_mixer_recommendations:
+  - condition: "always"
+    recommends: LinearMix
+    priority: baseline_first
+
+  - condition: "n_rows >= 10000 AND complex_temporal_pattern"
+    recommends: PatchAttentionMix
+    requires: PatchEmbedding
+
+  - condition: "has_local_patterns (spike, change_point)"
+    recommends: ConvMix
+
+channel_mixer_recommendations:
+  - condition: "high_cross_corr_pairs >= 5 AND n_features > 10"
+    recommends: InvertedAttentionMix
+
+  - condition: "high_cross_corr_pairs >= 3 AND n_features <= 10"
+    recommends: FeatureMLPMix
+
+loss_recommendations:
+  - condition: "extreme_ratio > 2.0"
+    recommends: AsymmetricLoss
+    param_hint: "under_weight = min(extreme_ratio, 5.0)"
+
+  - condition: "target_skew > 1.5"
+    recommends: Huber
+
+constraint_recommendations:
+  - condition: "can_be_negative == false AND target_min >= 0"
+    recommends: Positivity
+
+forecasting_setting_auto_detect:
+  - if: "변수가 1개"
+    then: S
+
+  - if: "사용자가 target_col 1개 지정 + 다른 변수 존재"
+    then: MS
+
+  - if: "사용자가 target_col 미지정 또는 전부"
+    then: M

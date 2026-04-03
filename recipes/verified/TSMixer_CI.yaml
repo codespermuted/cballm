@@ -1,0 +1,27 @@
+name: TSMixer_CI
+source: "Chen et al., 2023 (TMLR)"
+setting: [M, MS]
+channel_independent: true
+
+blocks:
+  normalizer: RevIN
+  encoder: PatchEmbedding
+  temporal_mixer: PatchMLPMix
+  channel_mixer: null
+  head: LinearHead
+
+encoder_config:
+  patch_len: 16
+  stride: 8
+
+hp:
+  lr: 1.0e-4
+  epochs: 100
+  patience: 20
+  weight_decay: 1.0e-5
+
+benchmark:
+  ETTh1: 0.375
+  Weather: 0.164
+
+best_for: [moderate_data, efficient_alternative_to_PatchTST]
