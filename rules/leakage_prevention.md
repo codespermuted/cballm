@@ -91,6 +91,46 @@ def check_leakage(df, feature_col, target_col, datetime_col, prediction_length):
   → 이건 test에 과적합한 것
 ```
 
+### Time-Aware Cross Validation + Refit 프로토콜
+
+**단일 holdout보다 Time-Aware CV를 기본으로 사용한다.**
+
+```
+방법: Sliding Window (또는 Expanding Window) CV
+
+Fold 1: |--- train_1 ---|-- gap --|-- val_1 --|
+Fold 2:    |--- train_2 ---|-- gap --|-- val_2 --|
+Fold 3:       |--- train_3 ---|-- gap --|-- val_3 --|
+...
+→ 각 fold의 val 메트릭 평균 + 표준편차로 모델 선택
+→ 분산이 큰 모델은 불안정 → 페널티
+```
+
+**규칙:**
+- fold 수 ≥ 3 (최소 3개 시간 창으로 검증)
+- 각 fold 사이 gap = prediction_length (leakage 방지)
+- fold별 메트릭을 모두 기록 (평균만 보면 불안정성이 가려짐)
+- **모델 선택은 CV 평균 메트릭으로, 최종 보고는 test set으로**
+
+**Refit (최종 모델 확정 후 필수):**
+
+```
+올바른 최종 흐름:
+  1. Time-Aware CV로 최적 모델 + HP 선택
+  2. 최종 모델 확정 (여기서 모델 구조/HP 동결)
+  3. train + val 전체 데이터로 refit (test는 제외)
+  4. refit된 모델로 test set 1회 평가 → 이 숫자가 최종 성능
+
+이유:
+  - CV 중 val로 쓰였던 데이터도 학습에 활용 → 더 많은 데이터로 학습
+  - HP는 이미 확정되었으므로 과적합 위험 없음
+  - 실제 배포 시에도 가용 데이터 전부로 refit하는 것이 표준
+```
+
+**⛔ Refit 시 주의:**
+- refit 후 HP를 다시 튜닝하면 안 됨 (그건 test에 대한 간접 과적합)
+- refit 전후 train loss가 크게 다르면 데이터 분포 변화 의심 → 경고
+
 ## 3. Feature Engineering 시 절대 규칙
 
 - **target에서 파생된 feature는 반드시 shift(prediction_length) 적용**

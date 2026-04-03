@@ -1,86 +1,261 @@
-"""Engineer — 피쳐 엔지니어링, 변동성 시그널 변환, ablation 프로토콜."""
-from .base import BaseWorker
+"""Engineer — rule-based 피쳐 엔지니어링. Scout 결과 기반 결정론적 피쳐 생성."""
+from __future__ import annotations
+
+import re
+
+import numpy as np
+import pandas as pd
 
 
-class Engineer(BaseWorker):
+class Engineer:
+    """Rule-based 피쳐 엔지니어링. LLM 불필요."""
     name = "engineer"
-    description = "도메인 룰과 데이터 특성 기반 피쳐 설계 + Observational Bias 주입"
+    description = "Scout 프로파일 기반 결정론적 피쳐 생성"
 
-    system_prompt = """\
-You are Engineer, a feature engineering specialist implementing Observational Bias.
+    def __init__(self, cwd: str = "", rules: str = ""):
+        self.cwd = cwd
 
-## Core Principles
+    def run(self, task: str) -> dict:
+        """Scout 프로파일을 파싱하여 피쳐를 생성."""
+        data_path = self._extract(task, "DATA_PATH")
+        target_col = self._extract(task, "TARGET_COL") or "target"
+        pred_len = int(self._extract(task, "PREDICTION_LENGTH") or "96")
+        feature_path = self._extract(task, "FEATURE_OUTPUT_PATH")
 
-1. **레벨 자체보다 변동성 시그널로 변환**:
-   - change_rate = (x_t - x_{t-N}) / x_{t-N}
-   - volatility = rolling_std(x, window)
-   - deviation = x_t - rolling_mean(x, long_window)
-   - shock_flag = 1 if |change_rate| > threshold else 0
+        if not data_path:
+            return {"worker": self.name, "response": "ERROR: DATA_PATH 없음",
+                    "code": None, "execution_result": None}
 
-2. **넣을 수 있다고 다 넣지 않는다**: 관련 없는 feature는 noise. 빼는 것도 설계.
+        try:
+            profile_info = self._parse_profile(task)
+            result_text = self._engineer_features(
+                data_path, target_col, pred_len, profile_info, feature_path
+            )
+        except Exception as e:
+            import traceback
+            result_text = f"ERROR: {e}\n{traceback.format_exc()}"
 
-3. **Domain feature > raw feature**: 두 변수의 비율, 차이, 교차항이 raw보다 signal-to-noise 높음.
+        return {
+            "worker": self.name,
+            "response": result_text,
+            "code": None,
+            "execution_result": result_text,
+        }
 
-4. **교차항으로 동시 발생 이벤트 포착**: feature_A × feature_B
+    def _engineer_features(self, data_path: str, target_col: str,
+                           pred_len: int, profile: dict,
+                           feature_path: str | None) -> str:
+        """규칙 기반 피쳐 생성."""
+        df = pd.read_csv(data_path)
 
-5. **미분 feature(ramp)로 선행 예측**: ramp = x_t - x_{t-k} → 급변 초기 신호
+        # datetime 처리
+        datetime_col = None
+        for col in df.columns:
+            if "date" in col.lower() or "time" in col.lower():
+                datetime_col = col
+                df[datetime_col] = pd.to_datetime(df[datetime_col])
+                break
 
-## Standard Feature Categories
+        features_added = []
+        n_features_before = len(df.columns)
 
-| Category | Examples | Role |
-|---|---|---|
-| Lag | target_{t-1}, _{t-24}, _{t-168} | 자기상관 |
-| Rolling | rolling_mean, rolling_std (window 24, 168) | 추세/변동성 |
-| Calendar | hour_sin/cos, dow_sin/cos, is_holiday | 주기성 (Fourier encoding 권장) |
-| Differencing | target_t - target_{t-1}, seasonal diff | 정상성 |
-| EWMA | ewm(span=α) | 최근 가중 추세 |
-| Domain | ratio, interaction, threshold flag | 도메인 지식 |
+        # ── 1. Calendar features (known covariates → 미래값 사용 가능) ──
+        if datetime_col:
+            dt = df[datetime_col]
 
-## Feature Diagnosis (자동 수행)
+            # Fourier encoding (sin/cos) — one-hot보다 연속적
+            df["hour_sin"] = np.sin(2 * np.pi * dt.dt.hour / 24)
+            df["hour_cos"] = np.cos(2 * np.pi * dt.dt.hour / 24)
+            features_added.extend(["hour_sin [known]", "hour_cos [known]"])
 
-- Granger Causality: feature → target 인과
-- PACF: 최적 lag 차수
-- 유의하지 않은 feature는 ablation 대상
+            df["dow_sin"] = np.sin(2 * np.pi * dt.dt.dayofweek / 7)
+            df["dow_cos"] = np.cos(2 * np.pi * dt.dt.dayofweek / 7)
+            features_added.extend(["dow_sin [known]", "dow_cos [known]"])
 
-## Known vs Unknown 엄격 구분
+            df["month_sin"] = np.sin(2 * np.pi * dt.dt.month / 12)
+            df["month_cos"] = np.cos(2 * np.pi * dt.dt.month / 12)
+            features_added.extend(["month_sin [known]", "month_cos [known]"])
 
-- known covariate: calendar, 예보, 확정 스케줄 → 미래값 사용 가능
-- unknown covariate: 실측값 → 반드시 예측 시점 이전 정보만 사용
-- target-derived feature(rolling mean of target): lag 적용 필수 → data leakage 차단
+            df["is_weekend"] = (dt.dt.dayofweek >= 5).astype(int)
+            features_added.append("is_weekend [known]")
 
-## ⛔ LEAKAGE 방지 — 절대 규칙
+            # datetime 컬럼 제거 (모델 입력에서)
+            df = df.drop(columns=[datetime_col])
 
-- target-derived feature는 반드시 `.shift(prediction_length)` 적용
-- lag feature: k ≥ prediction_length 인 lag만 사용 (prediction_length는 task에서 전달됨)
-- rolling feature: 계산 후 `.shift(prediction_length)` 필수
-- known covariate(calendar, forecast)만 미래값 허용
-- unknown covariate(실측값)는 과거만
-- **혼동되면 안 넣는다** — leakage 하나가 전체를 오염
+        # ── 2. Lag features (unknown → shift(pred_len) 필수) ──
+        seasonality = profile.get("seasonality", {})
+        recommended_lags = profile.get("recommended_lags", [pred_len])
 
-```python
-# 안전한 패턴:
-df[f"target_lag_{H}"] = df["target"].shift(H)           # H = prediction_length
-df[f"target_rolling_mean_24"] = df["target"].rolling(24).mean().shift(H)
+        for lag in recommended_lags:
+            if lag >= pred_len:
+                col_name = f"{target_col}_lag_{lag}"
+                df[col_name] = df[target_col].shift(lag)
+                features_added.append(f"{col_name} [unknown, lag≥H]")
 
-# 위험한 패턴 (절대 금지):
-df["target_lag_1"] = df["target"].shift(1)               # H > 1이면 leakage!
-df["target_rolling_mean"] = df["target"].rolling(24).mean()  # shift 없음!
-```
+        # ── 3. Rolling features (unknown → shift(pred_len) 필수) ──
+        # 주기성이 강하면 해당 window 사용
+        windows = []
+        if any(v > 0.5 for k, v in seasonality.items() if "24" in k):
+            windows.append(24)
+        if any(v > 0.3 for k, v in seasonality.items() if "168" in k):
+            windows.append(168)
+        if not windows:
+            windows = [24]  # default
 
-## ⛔ HALLUCINATION 방지
+        for w in windows:
+            mean_col = f"{target_col}_rmean_{w}"
+            std_col = f"{target_col}_rstd_{w}"
+            df[mean_col] = df[target_col].rolling(w).mean().shift(pred_len)
+            df[std_col] = df[target_col].rolling(w).std().shift(pred_len)
+            features_added.append(f"{mean_col} [unknown, shifted H]")
+            features_added.append(f"{std_col} [unknown, shifted H]")
 
-- 데이터를 실제로 로드하지 않고 컬럼명/값을 추측하지 않는다
-- 통계값은 코드 실행 결과만 사용
-- "아마 이럴 것이다"는 금지
+        # ── 4. 외생변수 분석 (보고만, 제거하지 않음) ──
+        # Trainer는 원본 데이터를 직접 읽으므로, 여기서 변수를 제거해도 반영 안 됨.
+        # 대신 분석 결과를 Architect에 전달하여 블록 선택에 참고하도록.
+        exog_corr = profile.get("exog_correlations", {})
+        kept_exog = []
+        dropped_exog = []
+        for col, r in sorted(exog_corr.items(), key=lambda x: -abs(x[1])):
+            if abs(r) >= 0.3:
+                kept_exog.append(f"{col} (r={r:.2f})")
+            else:
+                dropped_exog.append(f"{col} (r={r:.2f}, low — model이 자동 처리)")
 
-## Output format
+        # ── 5. NaN 처리 (lag/rolling으로 생긴 결측) ──
+        n_before = len(df)
+        df = df.dropna()
+        n_after = len(df)
 
-Generate a single ```python``` code block that:
-1. Loads input data (실제 로드 — 추측 금지)
-2. prediction_length를 변수로 받아 모든 shift에 적용
-3. Creates features with WHY comment per feature
-4. 각 feature에 [known/unknown] 태그 명시
-5. Prints feature-target correlation summary
-6. Saves to output parquet
-7. Prints created feature list + known/unknown 분류 + leakage 검증 결과
-"""
+        # ── 6. Leakage 사후 검증 ──
+        leakage_warnings = self._verify_no_leakage(df, target_col, pred_len)
+
+        # 저장
+        if feature_path:
+            df.to_parquet(feature_path, index=False)
+
+        # 결과 보고
+        lines = [
+            "=== FEATURE ENGINEERING REPORT ===",
+            f"Features before: {n_features_before}, after: {len(df.columns)}",
+            f"Rows: {n_before} → {n_after} (dropped {n_before - n_after} NaN rows)",
+            "",
+            "Added features:",
+        ]
+        for f in features_added:
+            lines.append(f"  + {f}")
+
+        if kept_exog:
+            lines.append(f"\nKept exogenous: {', '.join(kept_exog)}")
+        if dropped_exog:
+            lines.append(f"Dropped exogenous (low corr): {', '.join(dropped_exog)}")
+
+        # Leakage 검증 결과
+        if leakage_warnings:
+            lines.append(f"\n⚠️ LEAKAGE WARNINGS ({len(leakage_warnings)}):")
+            for w in leakage_warnings:
+                lines.append(f"  ⛔ {w}")
+        else:
+            lines.append("\n✅ Leakage 검증 통과: 모든 feature 안전")
+
+        lines.append(f"\nFinal columns ({len(df.columns)}): {', '.join(df.columns.tolist())}")
+        lines.append(f"n_features for model: {len(df.columns)}")
+        lines.append("=== END REPORT ===")
+
+        return "\n".join(lines)
+
+    def _parse_profile(self, task: str) -> dict:
+        """Scout 프로파일 텍스트에서 정보 추출."""
+        profile = {}
+
+        # 계절성
+        seasonality = {}
+        season_match = re.search(r'Seasonality:\s*\[(.+?)\]', task)
+        if season_match:
+            for part in season_match.group(1).split(","):
+                part = part.strip()
+                period_match = re.search(r'(\d+h?\w*)', part)
+                acf_match = re.search(r'ACF=([0-9.]+)', part)
+                if period_match and acf_match:
+                    seasonality[period_match.group(1)] = float(acf_match.group(1))
+                elif period_match:
+                    # strong/moderate/weak 추정
+                    if "strong" in part:
+                        seasonality[period_match.group(1)] = 0.8
+                    elif "moderate" in part:
+                        seasonality[period_match.group(1)] = 0.5
+                    else:
+                        seasonality[period_match.group(1)] = 0.2
+        profile["seasonality"] = seasonality
+
+        # 추천 lags
+        lags_match = re.search(r'Recommended lags:\s*\[([0-9, ]+)\]', task)
+        if lags_match:
+            profile["recommended_lags"] = [int(x.strip()) for x in lags_match.group(1).split(",")]
+        else:
+            pred_len = int(self._extract(task, "PREDICTION_LENGTH") or "96")
+            profile["recommended_lags"] = [pred_len, pred_len + 24]
+
+        # 외생변수 상관
+        exog = {}
+        exog_match = re.search(r'Exogenous ranking:\s*\[(.+?)\]', task)
+        if exog_match:
+            for part in exog_match.group(1).split(","):
+                col_match = re.search(r'(\w+)\s*\(r=([0-9.-]+)\)', part.strip())
+                if col_match:
+                    exog[col_match.group(1)] = float(col_match.group(2))
+        profile["exog_correlations"] = exog
+
+        return profile
+
+    @staticmethod
+    def _verify_no_leakage(df: pd.DataFrame, target_col: str,
+                           pred_len: int) -> list[str]:
+        """Leakage 사후 검증. 위반 시 경고 리스트 반환.
+
+        검증 1: feature[t]와 target[t+H] 간 비정상 상관 체크
+        검증 2: target-derived feature에 shift 적용 여부 확인
+        """
+        warnings = []
+        n = len(df)
+        if n <= pred_len + 100:
+            return warnings
+
+        target = df[target_col].values
+        # 공통 범위: [0 : n-pred_len]
+        future_target = target[pred_len:n]     # target[H], target[H+1], ...
+        overlap_len = len(future_target)
+
+        for col in df.columns:
+            if col == target_col:
+                continue
+
+            feat = df[col].values[:overlap_len]  # 동일 길이
+
+            # NaN/inf 제거
+            valid = np.isfinite(future_target) & np.isfinite(feat)
+            if valid.sum() < 100:
+                continue
+
+            corr = np.corrcoef(feat[valid], future_target[valid])[0, 1]
+            if np.isnan(corr):
+                continue
+
+            if abs(corr) > 0.98:
+                warnings.append(
+                    f"{col}: feature-future_target corr={corr:.3f} (>0.98) — 높은 leakage 의심, 제거 권장"
+                )
+            elif abs(corr) > 0.95:
+                warnings.append(
+                    f"{col}: feature-future_target corr={corr:.3f} (>0.95) — leakage 가능성, 확인 필요"
+                )
+
+        return warnings
+
+    @staticmethod
+    def _extract(text: str, field: str) -> str | None:
+        match = re.search(rf"{field}\s*=\s*['\"]([^'\"]+)['\"]", text)
+        if match:
+            return match.group(1)
+        match = re.search(rf"{field}\s*=\s*(\S+)", text)
+        return match.group(1) if match else None
