@@ -1,59 +1,161 @@
-# 🧠 CBALLM
+# CBALLM
 
-**AI 데이터 사이언티스트 오케스트레이터** — 도메인 룰 기반 자동 시계열 예측 파이프라인
+**Explainable Time Series Modeling through Decision Protocol**
 
-LLM이 5명의 전문 워커를 조율하여, 도메인 지식을 반영한 정교한 모델링을 수행합니다.
+AutoML that tells you *why*, not just *what*.
 
-## 아키텍처
+## The Problem
+
+Existing AutoML tools (AutoGluon, AutoTS) give you a number: "MSE = 0.37". But they can't answer: *Why this model? Why these features? What would change if the data had different characteristics?*
+
+CBALLM doesn't try to beat ensemble AutoML on leaderboard scores. Instead, it produces a **modeling report** — a step-by-step record of every decision, with evidence and reasoning, that explains *why this model for this data*.
+
+## How It Works
 
 ```
-사용자: "이 데이터로 SMP 예측해줘"
+Your Data
   ↓
-🧠 Brain (오케스트레이터) — 27B LLM, 프롬프트 스위칭
-  ├→ 📊 Scout     데이터 프로파일링, regime 진단, prior 후보 수집
-  ├→ 🔧 Engineer  피쳐 엔지니어링 (Observational Bias 주입)
-  ├→ 🏗️ Architect  모델 선택 + 3-Bias Prior Injection
-  ├→ 🏋️ Trainer    학습 실행 (temporal validation 엄수)
-  └→ 🔍 Critic     결과 분석, 정상/극단 분리 평가, 피드백 라우팅
-                      ↓
-                  DONE? → 완료
-                  RETRY? → 해당 워커로 복귀 (최대 3회)
+Scout (rule-based)     → Data profile: seasonality, stationarity, regime, correlations
+  ↓
+Engineer (rule-based)  → Feature engineering: lag, rolling, calendar (with leakage verification)
+  ↓
+Architect (LLM)        → Decision Protocol: 7 micro-questions, each with evidence + default
+  ↓
+Trainer (template)     → Block assembly + training + standard metrics
+  ↓
+Critic (rule-based)    → Evaluation + specific feedback → retry or done
 ```
 
-## 핵심 설계 철학
+**Only the Architect uses LLM.** Everything else is deterministic. The LLM answers narrow, bounded questions — not "design a model", but "harmonics = 2, agree?"
 
-- **정교한 단일 모델 + prior 주입 우선, 앙상블은 마지막 수단**
-- **3-Bias Prior Injection** (PIML 표준): Observational → Inductive → Learning
-- **도메인 룰은 코드화된 자산** — `rules/` 디렉토리에 마크다운으로 관리
-- **모델 1개, 세션 여러 개** — VRAM 추가 0, 프롬프트 스위칭으로 워커 특화
+## Decision Protocol
 
-## 사용법
+The core innovation. Code asks, LLM answers:
+
+```
+Step 0: Preprocessing
+  Evidence: target_min=2.67, skew=0.97
+  Default:  no log transform
+  LLM:      agree
+
+Step 1: Input Design
+  Evidence: dominant_period=24, pred_len=96
+  Default:  seq_len=96
+  LLM:      96
+
+Step 2: Encoding
+  Evidence: 24h ACF=0.94, 168h ACF=0.86 (2 strong periods)
+  Default:  Fourier(n_harmonics=2)
+  LLM:      1 | 24h is dominant, 168h is just a multiple
+
+Step 3: Backbone
+  Evidence: n_rows=17420, regime=stable
+  Default:  Linear
+  LLM:      agree | smooth data, complexity unnecessary
+
+Step 4: Constraint + Loss
+  Evidence: can_be_negative=true, extreme/normal ratio=1.3
+  Default:  MAE
+  LLM:      MAE
+
+Step 5: Training Strategy
+  Evidence: n_rows=17420
+  Default:  3-fold CV
+  LLM:      3
+
+Step 6: Regime
+  Evidence: stable (0 changes)
+  Default:  no gate
+  LLM:      agree
+```
+
+**This Q&A log IS the modeling report.** Every decision is traceable.
+
+## Slot-Based Block System
+
+Models are assembled from verified blocks via JSON config — no code generation by LLM:
+
+```
+Input → [Encoder] → [Backbone] → [Constraint?] → [Regime?] → Output
+           ↑            ↑            ↑                ↑
+        Linear       Linear      Positivity       SoftGate
+        Fourier      PatchMLP    Clamp             HardGate
+                                 Smoothness
+                                 Monotonic
+```
+
+```python
+from cballm.blocks.builder import build_model
+
+config = {
+    "encoder": {"type": "Fourier", "n_harmonics": 2},
+    "backbone": {"type": "Linear"},
+    "constraint": [],
+    "loss": {"type": "MAE"},
+}
+model, loss_fn = build_model(config, seq_len=96, pred_len=96, n_features=7)
+```
+
+## Quick Start
 
 ```bash
-# 기본 실행
-python -m cballm data.parquet --target smp --horizon 24
+# Run full pipeline
+python -m cballm data.csv --target OT --horizon 96
 
-# 도메인 룰 지정
-python -m cballm data.parquet --target smp --horizon 24 --rules rules/
+# Benchmark mode (standard train/val/test split)
+python -m cballm data.csv --target OT --horizon 96 --benchmark
 
-# 추가 지시사항
-python -m cballm data.parquet --target smp --horizon 24 --instructions "Dip 구간 성능 중시"
+# With domain rules
+python -m cballm data.csv --target OT --horizon 96 --rules rules/
 ```
 
-## 룰 시스템
+## Benchmark Results
 
-`rules/` 디렉토리에 `.md` 파일로 도메인 지식을 정리하면 워커에 자동 주입됩니다:
+ETTh1, MS setting (multivariate input → single target), pred_len=96:
 
-- `rules/general.md` — 범용 시계열 모델링 노하우 (워커별 해당 섹션만 추출)
-- `rules/energy.md` — 에너지/전력 시장 특화 룰
+| Model | norm_MSE | norm_MAE | Source |
+|-------|----------|----------|--------|
+| PatchTST | ~0.08 | ~0.19 | Paper (2023) |
+| DLinear | ~0.09 | ~0.23 | Paper (2023) |
+| **CBALLM (Linear)** | **0.084** | **0.216** | This project |
+| CBALLM (PatchMLP) | 0.230 | 0.450 | This project |
 
-워커별로 필요한 섹션만 주입하여 컨텍스트를 절약합니다.
+CBALLM's Linear backbone achieves DLinear-level performance. The value is not in beating SOTA — it's in the **explainable modeling report** that accompanies every result.
 
-## 의존성
+## Architecture Decisions
 
-- **Qwopus** — LLM 엔진 (27B 로컬 모델)
-- **C-BAL** (선택) — AutoML 시계열 예측 라이브러리
+| Component | Approach | Why |
+|-----------|----------|-----|
+| Scout | Rule-based (pandas + statsmodels) | Profiling is deterministic — ACF, ADF, correlations |
+| Engineer | Rule-based (lag, rolling, calendar) | Feature patterns are well-defined, leakage verification built-in |
+| Architect | LLM (Decision Protocol) | Only component needing judgment — "what fits this data?" |
+| Trainer | Template engine (build_model + train loop) | Eliminates LLM code generation failures |
+| Critic | Rule-based (metric parsing) | Evaluation criteria are objective |
 
-## 라이선스
+**Why only Architect uses LLM?** We tried having LLM generate training scripts — syntax errors, hallucinated column names, worker confusion. We tried having LLM choose from a menu — it always picked the same complex config. Decision Protocol gives LLM the right scope: narrow, evidence-based judgment calls.
+
+## Infrastructure
+
+- **Standard benchmark splits** (ETTh1/h2: 12:4:4 ratio)
+- **Train-only normalization** (no test information leakage)
+- **Backbone-specific HP presets** (Linear: lr=1e-3, PatchMLP: lr=1e-4)
+- **Leakage post-verification** (feature-future target correlation check)
+- **Dual model engine** (Qwopus for reasoning, Qwen Coder for code — swappable)
+
+## What's Not Done Yet
+
+- **MLP/Transformer backbones**: Training instability (epoch-0 early stop). Disabled until standalone quality is verified.
+- **Engineer → Trainer full integration**: Feature engineering results now flow to Trainer, but ablation showing feature value is pending.
+- **Multi-dataset validation**: Tested on ETTh1/ETTh2. Weather, ECL, and other datasets needed.
+- **Open-ended LLM modeling**: Currently "closed questions + confirm". Future: let LLM propose hypotheses from residual analysis.
+
+## Requirements
+
+- Python 3.10+
+- PyTorch 2.0+
+- Local LLM engine (llama-cpp-python) with ~18GB VRAM
+- Optional: statsmodels, neuralforecast
+
+## License
 
 MIT
