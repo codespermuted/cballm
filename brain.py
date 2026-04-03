@@ -202,12 +202,19 @@ class Brain:
             print(f"     📋 config: {config_json[:200]}")
 
             # ── Step 4: Trainer (템플릿 실행기, LLM 불필요) ──
+            # Engineer가 피쳐 파일을 생성했으면 그걸 사용, 아니면 원본
+            train_data_path = feature_path if Path(feature_path).exists() else data_path
+            if train_data_path != data_path:
+                print(f"     📂 Engineer 피쳐 사용: {train_data_path}")
+
+            trainer_contract = (
+                f"DATA_PATH = '{train_data_path}'\n"
+                f"TARGET_COL = '{target_col}'\n"
+                f"PREDICTION_LENGTH = {prediction_length}\n"
+            )
             trainer_task = (
-                f"{contract}\n"
-                f"Architect 설계:\n{config_json}\n\n"
-                f"데이터 경로: {data_path}\n"
-                f"타겟: {target_col}\n"
-                f"예측 길이: {prediction_length}\n"
+                f"{trainer_contract}\n"
+                f"Architect 설계:\n{config_json}\n"
             )
 
             mode_label = "benchmark" if self.benchmark_mode else "CV"

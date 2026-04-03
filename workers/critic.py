@@ -145,6 +145,7 @@ class Critic:
         # Case 3: 정상적 메트릭 존재
         else:
             analysis_parts.append(f"전체 MAE: {mae:.4f}")
+            extreme_ratio = 1.0  # 기본값
 
             # Extreme 대응력 점검
             if normal and extreme:
@@ -177,9 +178,18 @@ class Critic:
                     suggestions.append("현재 접근 유지하면서 피쳐 조합 변경 시도")
                     verdict = "RETRY_FEATURES"
             elif iteration == 1:
-                # 첫 iteration: baseline 확보, 다음에 개선 시도
-                suggestions.append("현재 baseline 대비 피쳐 조합 변경 시도")
-                suggestions.append("앙상블 또는 다른 모델 아키텍처 시도")
+                # 첫 iteration: baseline 확보 → 구체적 개선 방향 제시
+                norm_mse = metrics.get("norm", {}).get("MSE")
+                if norm_mse and norm_mse > 0.3:
+                    suggestions.append("norm_MSE가 높음 — backbone을 PatchMLP로 변경 시도")
+                elif norm_mse and norm_mse < 0.15:
+                    suggestions.append("baseline이 이미 좋음 — encoder 변경(Fourier harmonics 조정)으로 미세 튜닝")
+                else:
+                    suggestions.append("loss를 Huber로 변경하여 이상치 영향 감소 시도")
+
+                if extreme_ratio > 1.5:
+                    suggestions.append(f"극단 구간 MAE 비율 {extreme_ratio:.1f}배 — Asymmetric loss 검토")
+
                 verdict = "RETRY_FEATURES"
             else:
                 analysis_parts.append("추가 개선 여지 제한적 — 현재 결과로 마무리 권장")

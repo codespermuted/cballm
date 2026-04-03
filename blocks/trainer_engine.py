@@ -199,7 +199,10 @@ def train_model(
     print(f"HP preset ({backbone_type}): lr={lr}, epochs={epochs}, patience={patience}, wd={weight_decay}")
 
     # ── 1. 데이터 로드 ──
-    df = pd.read_csv(data_path)
+    if data_path.endswith(".parquet"):
+        df = pd.read_parquet(data_path)
+    else:
+        df = pd.read_csv(data_path)
 
     # datetime 컬럼 제거 (있으면)
     datetime_cols = [c for c in df.columns if "date" in c.lower() or "time" in c.lower()]
