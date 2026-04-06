@@ -20,15 +20,24 @@ class Trainer:
         self.benchmark_mode = benchmark_mode
         self.val_subset = val_subset
 
-    def run(self, task: str) -> dict:
-        """task에서 config와 데이터 정보를 추출하여 학습 실행."""
+    def run(self, task: str, config_dict: dict | None = None) -> dict:
+        """학습 실행.
+
+        config_dict가 있으면 텍스트 파싱을 건너뛰고 직접 사용.
+        없으면 기존 텍스트 파싱 (하위 호환).
+        """
         from cballm.blocks.trainer_engine import train_model
 
         data_path = self._extract_field(task, "DATA_PATH")
         target_col = self._extract_field(task, "TARGET_COL") or "OT"
         pred_len = int(self._extract_field(task, "PREDICTION_LENGTH") or "96")
 
-        model_config = self._extract_model_config(task)
+        # config_dict 직접 전달 → 텍스트 파싱 우회
+        if config_dict is not None:
+            import copy
+            model_config = copy.deepcopy(config_dict)
+        else:
+            model_config = self._extract_model_config(task)
 
         if not data_path:
             return {

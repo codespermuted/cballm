@@ -179,252 +179,165 @@ class Brain:
         # Scout profile에서 구조화 데이터 추출 (hooks용)
         scout_profile_dict = self._extract_profile_dict(context["profile"])
 
-        # ── Iteration Loop ──
+
+        # ── Iteration Loop (v4: multi-candidate + direct config) ──
+        from cballm.exploration import ExplorationBudget, CandidateGenerator
+        from cballm.composite_score import compute_composite_score
+        from cballm.synergy import SynergyChecker
+
         verdict = {}
         diagnosis = None
         retry_type = ""
+        composite_scores: list[float] = []
+
+        # KG slot recommendations 파싱
+        slot_recs = self._parse_slot_recs(context["kg_match"])
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             D.print_iteration_header(iteration, MAX_ITERATIONS)
 
-            # ── Step 3: Architect (LLM Decision Protocol) ──
-            # v2.1: PromptBuilder로 구조화된 프롬프트 생성
-            architect_task = prompt_builder.build(
-                ledger=self.ledger,
-                diagnosis=diagnosis,
-                verdict=verdict if verdict else None,
-                retry_type=retry_type,
+            # ── 1. ExplorationBudget ──
+            budget = ExplorationBudget.decide(iteration, composite_scores)
+            print(f"  Exploration: n={budget.n_candidates}, strategy={budget.strategy}")
+
+            # 2연속 score plateau → DONE
+            if (len(composite_scores) >= 2 and budget.n_candidates == 1
+                    and composite_scores[-1] > 0
+                    and abs(composite_scores[-1] - composite_scores[-2]) / max(composite_scores[-1], 0.001) < 0.01):
+                best = self.ledger.best_round()
+                report = self._build_final_report(context, {
+                    "verdict": "DONE", "best_metric": best.metrics if best else {},
+                    "analysis": "score plateau",
+                }, iteration)
+                D.print_final_report(report, {"verdict": "DONE"})
+                return report
+
+            # ── 2. 후보 생성 ──
+            candidates = CandidateGenerator.generate(
+                slot_recs=slot_recs, diagnosis=diagnosis,
+                ledger=self.ledger, budget=budget, profile=scout_profile_dict,
             )
+            # 중복 제거 + SynergyChecker
+            seen = set()
+            checked = []
+            for c in candidates:
+                sr = SynergyChecker.validate(c.config, scout_profile_dict)
+                if sr.applied_rules:
+                    print(f"  Synergy: {', '.join(sr.applied_rules)}")
+                c.config = sr.corrected
+                h = DiversityLedger.config_hash(c.config)
+                if h not in seen:
+                    seen.add(h)
+                    checked.append(c)
+            candidates = checked
 
-            # KG Matcher 결과 전달 (슬롯별 추천 포함)
-            architect_task += f"\n\nKG Matcher Result:\n{context['kg_match']}\n"
-            architect_task += f"PREDICTION_LENGTH = {prediction_length}\n"
+            for i, c in enumerate(candidates):
+                enc = c.config.get("encoder", {}).get("type", "?") if isinstance(c.config.get("encoder"), dict) else "?"
+                mix = c.config.get("temporal_mixer", {}).get("type", "?") if isinstance(c.config.get("temporal_mixer"), dict) else "?"
+                print(f"  [{chr(97+i)}] {c.label}: {enc}+{mix}")
 
-            # RETRY 정보 전달
-            if retry_type:
-                architect_task += f"RETRY_TYPE = {retry_type}\n"
-
-            # 이전 config 전달 (RETRY_HP 시 슬롯 유지용)
-            if retry_type == "RETRY_HP" and self.ledger.rounds:
-                prev = self.ledger.rounds[-1].config
-                architect_task += f"PREV_CONFIG={json.dumps(prev, ensure_ascii=False)}\n"
-
-            # blacklist 전달 (Diagnosis에서 ineffective 판정된 블록)
-            if diagnosis and diagnosis.diagnosis:
-                bl = diagnosis.diagnosis.block_blacklist
-                if bl:
-                    architect_task += f"Blacklist: {', '.join(bl)}\n"
-
-            print(D.section_header("Architect", "LLM"))
-            architect = Architect(self.cwd)
-            architect_result = architect.run(architect_task)
-            self.log.append(architect_result)
-
-            config_json = architect_result["response"]
-            context["config"] = config_json
-
-            D.print_architect_decisions(
-                architect_result.get("execution_result", ""),
-                config_json,
-            )
-
-            # Config 파싱
-            try:
-                config = json.loads(config_json)
-            except json.JSONDecodeError:
-                config = {}
-
-            # ── PreTrainHook: 사전 검증 ──
-            pre_verdict = PreTrainHook.check(config, scout_profile_dict, self.ledger)
-            if pre_verdict.exit_code == HookResult.DENY:
-                print(f"  PreTrainHook: DENY — {pre_verdict.reason}")
-                # 자동 대체: 미시도 레시피 중 다음 순위 선택 (LLM 재호출 없음)
-                from cballm.recipes.registry import find_recipes_for_profile
-                tried_names = {r.config.get("_recipe_name", "") for r in self.ledger.rounds}
-                tried_names.add(config.get("_recipe_name", ""))
-                candidates = find_recipes_for_profile(scout_profile_dict)
-                fallback_found = False
-                for cand in candidates:
-                    if cand["name"] not in tried_names:
-                        print(f"  -> 자동 대체: {cand['name']}")
-                        # 대체 레시피로 config 재구성 (최소 설정)
-                        blocks = cand.get("blocks", {})
-                        fallback_d_model = cand.get("d_model", 64)
-                        config = {
-                            "normalizer": {"type": blocks.get("normalizer", "RevIN"), "affine": True},
-                            "encoder": {"type": blocks.get("encoder", "LinearProjection"), "d_model": fallback_d_model},
-                            "temporal_mixer": {"type": blocks.get("temporal_mixer", "LinearMix")},
-                            "channel_mixer": None if not blocks.get("channel_mixer") else {"type": blocks["channel_mixer"]},
-                            "head": {"type": "LinearHead", "output_dim": 1},
-                            "constraint": [],
-                            "loss": {"type": "MAE"},
-                            "_recipe_name": cand["name"],
-                        }
-                        # encoder_config 적용
-                        enc_cfg = cand.get("encoder_config", {})
-                        if enc_cfg:
-                            config["encoder"].update(enc_cfg)
-                        # temporal_mixer_config 적용
-                        mix_cfg = cand.get("temporal_mixer_config", {})
-                        if mix_cfg:
-                            if isinstance(config["temporal_mixer"], dict):
-                                config["temporal_mixer"].update(mix_cfg)
-                            else:
-                                config["temporal_mixer"] = {"type": config["temporal_mixer"], **mix_cfg}
-                        config_json = json.dumps(config, ensure_ascii=False)
-                        fallback_found = True
-                        # PreTrainHook 재검증
-                        pre2 = PreTrainHook.check(config, scout_profile_dict, self.ledger)
-                        if pre2.exit_code == HookResult.DENY:
-                            tried_names.add(cand["name"])
-                            fallback_found = False
-                            continue
-                        break
-
-                if not fallback_found:
-                    # 모든 레시피 소진 → DONE
-                    print("  -> 모든 레시피 시도 완료")
-                    if self.ledger.rounds:
-                        best = self.ledger.best_round()
-                        report = self._build_final_report(context, {
-                            "verdict": "DONE",
-                            "best_model": best.config.get("_recipe_name", "unknown") if best else "unknown",
-                            "best_metric": best.metrics if best else {},
-                            "analysis": "모든 레시피 시도 완료",
-                        }, iteration)
-                        D.print_final_report(report, {"verdict": "DONE"})
-                        return report
-                    verdict = {"verdict": "DONE", "best_metric": {}, "analysis": "No valid recipe"}
-                    retry_type = "DONE"
-                    continue
-
-            elif pre_verdict.exit_code == HookResult.WARN:
-                print(f"  PreTrainHook: WARN — {pre_verdict.reason}")
-
-            # ── Step 4: Engineer (rule-based) ──
-            engineer_task = (
-                f"{contract}\n"
-                f"Scout Profile:\n{context['profile']}\n"
-            )
-            engineer = Engineer(self.cwd)
-            engineer_result = engineer.run(engineer_task)
-            self.log.append(engineer_result)
-            context["features"] = engineer_result.get("execution_result") or engineer_result["response"]
-
-            # ── Step 5: Trainer (deterministic) ──
-            # LLM 언로드 → GPU를 학습에 사용
+            # ── 3. LLM 순위 (R2+, n>1) ──
             from cballm.engine import unload_local_model, _engine_type
+            if len(candidates) > 1 and iteration > 1:
+                candidates = self._rank_candidates_llm(candidates)
+            elif len(candidates) > 1:
+                # R1: exploit first (baseline 확보)
+                exploit_first = [c for c in candidates if c.label == "exploit"]
+                others = [c for c in candidates if c.label != "exploit"]
+                candidates = exploit_first + others
             if _engine_type == "local":
                 unload_local_model()
 
-            # benchmark_mode: 원본 데이터만 사용 (논문 비교를 위해 feature engineering 미적용)
-            if self.benchmark_mode:
-                train_data_path = data_path
-            else:
-                train_data_path = feature_path if Path(feature_path).exists() else data_path
-
-            trainer_contract = (
-                f"DATA_PATH = '{train_data_path}'\n"
-                f"TARGET_COL = '{target_col}'\n"
-                f"PREDICTION_LENGTH = {prediction_length}\n"
-            )
-            trainer_task = (
-                f"{trainer_contract}\n"
-                f"Architect Config:\n{config_json}\n"
-            )
-
-            # Val subset 교대: 홀수 라운드 → A, 짝수 → B
+            # ── 4. 순차 학습 (config_dict 직접 전달) ──
+            train_data_path = data_path if self.benchmark_mode else (
+                feature_path if Path(feature_path).exists() else data_path)
             val_sub = "A" if iteration % 2 == 1 else "B"
-            print(D.section_header("Training", f"Bench val_{val_sub}" if self.benchmark_mode else "CV"))
-            trainer = Trainer(self.cwd, benchmark_mode=self.benchmark_mode, val_subset=val_sub)
-            trainer_result = trainer.run(trainer_task)
-            self.log.append(trainer_result)
+            round_best = None  # (mae, config, trainer_result, diag, metrics)
 
+            for ci, cand in enumerate(candidates):
+                config = cand.config
+
+                # PreTrainHook
+                pre = PreTrainHook.check(config, scout_profile_dict, self.ledger)
+                if pre.exit_code == HookResult.DENY:
+                    print(f"    [{chr(97+ci)}] DENY: {pre.reason}")
+                    continue
+
+                # Train — config_dict 직접 전달 (텍스트 파싱 우회)
+                trainer_task = (
+                    f"DATA_PATH = '{train_data_path}'\n"
+                    f"TARGET_COL = '{target_col}'\n"
+                    f"PREDICTION_LENGTH = {prediction_length}\n"
+                )
+                tag = f"val_{val_sub}" if self.benchmark_mode else "CV"
+                print(f"    [{chr(97+ci)}] Training ({tag})...")
+                trainer = Trainer(self.cwd, benchmark_mode=self.benchmark_mode, val_subset=val_sub)
+                trainer_result = trainer.run(trainer_task, config_dict=config)
+                self.log.append(trainer_result)
+
+                # Metrics
+                result_text = trainer_result.get("execution_result") or trainer_result["response"]
+                metrics = self._extract_metrics_from_result(result_text)
+                mae = metrics.get("MAE")
+                best_epoch = trainer_result.get("best_epoch", 0)
+                max_epochs = trainer_result.get("max_epochs", 50)
+
+                # INVALID_TRAINING
+                inv_th = max(1, int(max_epochs * 0.05))
+                if best_epoch < inv_th:
+                    print(f"    [{chr(97+ci)}] INVALID (epoch {best_epoch}/{max_epochs})")
+                    continue
+
+                # Early Abort
+                if round_best and mae and round_best[0] and mae > round_best[0] * 1.5:
+                    print(f"    [{chr(97+ci)}] Abort: {mae:.4f} >> {round_best[0]:.4f}")
+                    continue
+
+                # PostTrainHook
+                residuals = self._extract_residuals(trainer_result)
+                head_cfg = config.get("head", {})
+                dist = head_cfg.get("distribution") if isinstance(head_cfg, dict) else None
+                cand_diag = PostTrainHook.diagnose(
+                    config=config, metrics=metrics, profile=scout_profile_dict,
+                    ledger=self.ledger, residuals=residuals, pred_len=prediction_length,
+                    distribution=dist,
+                    train_loss_history=trainer_result.get("train_loss_history", []),
+                    val_loss_history=trainer_result.get("val_loss_history", []),
+                    val_mae_by_step=trainer_result.get("val_mae_by_step", []),
+                    val_predictions=trainer_result.get("val_predictions"),
+                    best_epoch=best_epoch, max_epochs=max_epochs,
+                )
+
+                norm_mse = metrics.get("norm_MSE", "?")
+                print(f"    [{chr(97+ci)}] MAE={mae}, nMSE={norm_mse}")
+
+                if round_best is None or (mae is not None and mae < round_best[0]):
+                    round_best = (mae, config, trainer_result, cand_diag, metrics)
+
+            # ── 5. 전부 실패 ──
+            if round_best is None:
+                print(f"  No valid candidate")
+                verdict = {"verdict": "RETRY_RECIPE", "best_metric": {}}
+                retry_type = "RETRY_RECIPE"
+                diagnosis = None
+                continue
+
+            # ── 6. Best → Critic + CompositeScore ──
+            best_mae, config, trainer_result, diagnosis, train_metrics = round_best
+            config_json = json.dumps(config, ensure_ascii=False)
+            context["config"] = config_json
             context["training_result"] = trainer_result.get("execution_result") or trainer_result["response"]
 
-            # ── PostTrainHook: 잔차 진단 + 블록 기여도 ──
-            train_metrics = self._extract_metrics_from_result(context["training_result"])
-            residuals = self._extract_residuals(trainer_result)
-
-            # 분포 정보 추출 (DistributionFitChecker용)
-            head_cfg = config.get("head", {})
-            distribution = head_cfg.get("distribution") if isinstance(head_cfg, dict) else None
-
-            # Trainer 반환 확장 데이터 추출
-            train_loss_history = trainer_result.get("train_loss_history", [])
-            val_loss_history = trainer_result.get("val_loss_history", [])
-            val_mae_by_step = trainer_result.get("val_mae_by_step", [])
-            val_predictions = trainer_result.get("val_predictions")
-            trainer_best_epoch = trainer_result.get("best_epoch", 0)
-            trainer_max_epochs = trainer_result.get("max_epochs", 100)
-
-            import logging
-            logging.debug(
-                f"PostTrainHook inputs: best_epoch={trainer_best_epoch}, "
-                f"max_epochs={trainer_max_epochs}, "
-                f"train_history_len={len(train_loss_history)}, "
-                f"val_history_len={len(val_loss_history)}"
-            )
-
-            diagnosis = PostTrainHook.diagnose(
-                config=config,
-                metrics=train_metrics,
-                profile=scout_profile_dict,
-                ledger=self.ledger,
-                residuals=residuals,
-                pred_len=prediction_length,
-                distribution=distribution,
-                train_loss_history=train_loss_history,
-                val_loss_history=val_loss_history,
-                val_mae_by_step=val_mae_by_step,
-                val_predictions=val_predictions,
-                best_epoch=trainer_best_epoch,
-                max_epochs=trainer_max_epochs,
-            )
-
-            if diagnosis.directive != "진단 이상 없음":
-                print(f"  PostTrainHook: {diagnosis.directive[:100]}")
-
-            # ── Step 6: Critic (rule-based) ──
             critic_task = (
                 f"Training result:\n{context['training_result'][:2000]}\n\n"
                 f"Iteration: {iteration}/{MAX_ITERATIONS}\n"
             )
-
             prev_mae = context.get("prev_mae")
             prev_norm_mse = context.get("prev_norm_mse")
             critic = Critic(self.cwd, prev_mae=prev_mae, prev_norm_mse=prev_norm_mse)
             critic_result = critic.run(critic_task)
             self.log.append(critic_result)
-
             verdict = json.loads(critic_result["response"])
-
-            # ── INVALID_TRAINING 감지 ──
-            # best_epoch < max_epochs * 0.05 → 학습 실패 판정
-            is_valid_training = True
-            invalid_threshold = max(1, int(trainer_max_epochs * 0.05))
-            if trainer_best_epoch < invalid_threshold:
-                is_valid_training = False
-                recipe_name = config.get("_recipe_name", "unknown")
-                print(f"  INVALID_TRAINING: best_epoch={trainer_best_epoch}/{trainer_max_epochs} "
-                      f"(< {invalid_threshold}), recipe={recipe_name}")
-
-                # 같은 recipe 연속 실패 카운트
-                recipe_fail_key = f"_invalid_{recipe_name}"
-                context[recipe_fail_key] = context.get(recipe_fail_key, 0) + 1
-
-                if context[recipe_fail_key] >= 2:
-                    # 2회 연속 → recipe 포기, 다음 recipe
-                    print(f"  -> {recipe_name} 2회 연속 학습 실패, recipe 포기")
-                    verdict["verdict"] = "RETRY_RECIPE"
-                    verdict["analysis"] = f"{recipe_name} 학습 2회 연속 실패"
-                else:
-                    # 1회 → RETRY_HP (lr 낮추고 warmup 추가)
-                    verdict["verdict"] = "RETRY_HP"
-                    verdict["suggestions"] = [
-                        f"lr *= 0.5, warmup += 5, d_model = recipe recommended",
-                        f"best_epoch={trainer_best_epoch} < threshold={invalid_threshold}",
-                    ]
 
             D.print_critic_verdict(
                 verdict["verdict"],
@@ -433,83 +346,98 @@ class Brain:
                 verdict.get("suggestions", []),
             )
 
-            # ── CompositeScore 계산 ──
-            from cballm.composite_score import compute_composite_score
+            # CompositeScore
             current_mae = verdict.get("best_metric", {}).get("MAE")
             current_norm_mse = verdict.get("best_metric", {}).get("norm_MSE")
-            baseline_mae = context.get("naive_mae", (current_mae or 1.0) * 1.5)
-            disagree_stab = diagnosis.disagreement.stability if diagnosis.disagreement else 1.0
-            dist_p = None
-            if diagnosis.residual and hasattr(diagnosis, 'diagnosis'):
-                # DistributionFitChecker 결과
-                pass  # dist_fit_pvalue는 아직 별도 저장 안 됨
-
+            baseline = context.get("naive_mae", (current_mae or 1.0) * 1.5)
+            val_steps = trainer_result.get("val_mae_by_step", [])
+            d_stab = diagnosis.disagreement.stability if diagnosis and diagnosis.disagreement else 1.0
             composite = compute_composite_score(
-                val_mae=current_mae or 0,
-                baseline_mae=baseline_mae,
-                val_mae_by_step=val_mae_by_step if val_mae_by_step else None,
+                val_mae=current_mae or 0, baseline_mae=baseline,
+                val_mae_by_step=val_steps or None,
                 residual_diagnosis=diagnosis.residual if diagnosis else None,
-                disagreement_stability=disagree_stab,
+                disagreement_stability=d_stab,
             )
-            if is_valid_training:
-                print(f"  CompositeScore: {composite.summary()}")
+            composite_scores.append(composite.weighted_score())
+            print(f"  CompositeScore: {composite.summary()}")
 
-            # ── Ledger에 라운드 기록 ──
-            config_hash = DiversityLedger.config_hash(config)
-            round_record = RoundRecord(
-                round_num=iteration,
-                config=config,
-                config_hash=config_hash,
+            # Ledger
+            ch = DiversityLedger.config_hash(config)
+            record = RoundRecord(
+                round_num=iteration, config=config, config_hash=ch,
                 metrics=verdict.get("best_metric", {}),
-                verdict=verdict.get("verdict", ""),
-                diagnosis=diagnosis,
+                verdict=verdict.get("verdict", ""), diagnosis=diagnosis,
             )
-            round_record._valid_training = is_valid_training
-            round_record._composite_score = composite
-            self.ledger.add_round(round_record)
+            record._valid_training = True
+            record._composite_score = composite
+            self.ledger.add_round(record)
 
-            # MAE/norm_MSE 저장 — 유효 학습만 비교 대상으로 갱신
-            if is_valid_training and current_mae is not None:
+            if current_mae is not None:
                 context["prev_mae"] = current_mae
-            if is_valid_training and current_norm_mse is not None:
+            if current_norm_mse is not None:
                 context["prev_norm_mse"] = current_norm_mse
 
-            # ── 분기 판단 ──
+            # ── 7. 분기 ──
             v = verdict.get("verdict", "")
             retry_type = v
-
-            # DONE이지만 유효 학습이 없으면 계속 시도
-            if v == "DONE" and not is_valid_training and iteration < MAX_ITERATIONS:
-                v = "RETRY_RECIPE"
-                retry_type = "RETRY_RECIPE"
-
             if v == "DONE" or iteration == MAX_ITERATIONS:
                 report = self._build_final_report(context, verdict, iteration)
                 D.print_final_report(report, verdict)
                 return report
 
-            # RETRY_BLOCK: KG에 대체 블록 쿼리
-            if v == "RETRY_BLOCK":
-                kg_task_retry = (
-                    f"{contract}\n"
-                    f"Scout Profile:\n{context['profile']}\n"
-                    f"Current config failed blocks:\n{config_json}\n"
-                    f"Diagnostic: {diagnosis.directive}\n"
-                    f"Critic: {verdict.get('analysis', '')}\n"
-                )
-                kg_retry_result = kg_matcher.run(kg_task_retry)
-                context["kg_match"] = kg_retry_result.get("execution_result") or kg_retry_result["response"]
-                self.log.append(kg_retry_result)
-                # PromptBuilder 갱신
-                prompt_builder = ArchitectPromptBuilder(
-                    profile=context["profile"],
-                    kg_match=context["kg_match"],
-                    prediction_length=prediction_length,
-                )
-
         report = self._build_final_report(context, verdict, MAX_ITERATIONS)
         D.print_final_report(report, verdict)
         return report
+
+
+    def _rank_candidates_llm(self, candidates) -> list:
+        from cballm.engine import chat
+        prompt = "Rank these time series model configs (best first):\n"
+        for i, c in enumerate(candidates):
+            enc = c.config.get("encoder", {}).get("type", "?") if isinstance(c.config.get("encoder"), dict) else "?"
+            mix = c.config.get("temporal_mixer", {}).get("type", "?") if isinstance(c.config.get("temporal_mixer"), dict) else "?"
+            prompt += f"({chr(97+i)}) {enc}+{mix} [{c.label}]\n"
+        prompt += "Answer: ranking like 'a > b > c'"
+        try:
+            answer = chat("Rank configs. Letter ranking only.", [{"role": "user", "content": prompt}], max_tokens=20)
+            print(f"  LLM rank: {answer.strip()}")
+            order = []
+            for ch in answer.lower():
+                if ch.isalpha() and ord(ch) - ord('a') < len(candidates):
+                    idx = ord(ch) - ord('a')
+                    if idx not in order:
+                        order.append(idx)
+            for i in range(len(candidates)):
+                if i not in order:
+                    order.append(i)
+            return [candidates[i] for i in order]
+        except Exception:
+            return candidates
+
+    @staticmethod
+    def _parse_slot_recs(kg_text: str) -> dict:
+        import re
+        slots = {}
+        for m in re.finditer(r'SLOT_(\w+)=\{(.+?)\}', kg_text):
+            slot = m.group(1).lower()
+            content = m.group(2)
+            rec = {}
+            rm = re.search(r'recommended=([^,}]+)', content)
+            if rm:
+                rec["recommended"] = rm.group(1).strip().strip("'\"[]")
+            om = re.search(r'options=\[([^\]]*)\]', content)
+            if om:
+                rec["options"] = [x.strip().strip("'\"") for x in om.group(1).split(",") if x.strip()]
+            slots[slot] = rec
+        dm = re.search(r'DATA_SCALE=\{(.+?)\}', kg_text)
+        if dm:
+            scale = {}
+            for k in ["d_model", "n_layers", "n_heads"]:
+                km = re.search(rf'{k}=(\d+)', dm.group(1))
+                if km:
+                    scale[k] = int(km.group(1))
+            slots["_data_scale"] = scale
+        return slots
 
     def _build_final_report(self, context: dict, verdict: dict, iterations: int) -> dict:
         # 최고 라운드 — 유효 학습 모델 중에서만

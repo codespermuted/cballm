@@ -349,8 +349,9 @@ class KGMatcher:
             slots["normalizer"] = {"recommended": "RevIN", "options": ["RevIN", "None"],
                                     "confidence": "high", "reason": "비정상"}
         else:
-            slots["normalizer"] = {"recommended": "None", "options": ["None", "RevIN"],
-                                    "confidence": "high", "reason": "정상"}
+            # 정상이어도 RevIN 기본 적용 (해가 안 되고, 분포 shift 방어)
+            slots["normalizer"] = {"recommended": "RevIN", "options": ["RevIN", "None"],
+                                    "confidence": "medium", "reason": "정상이지만 RevIN 안전"}
 
         # ── Q2: Decomposer ──
         # simple: None. 비정상이어도 RevIN이 처리.
