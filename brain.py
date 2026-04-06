@@ -200,8 +200,8 @@ class Brain:
             budget = ExplorationBudget.decide(iteration, composite_scores)
             print(f"  Exploration: n={budget.n_candidates}, strategy={budget.strategy}")
 
-            # 2연속 score plateau → DONE
-            if (len(composite_scores) >= 2 and budget.n_candidates == 1
+            # 2연속 score plateau → DONE (min 3 iterations 보장)
+            if (iteration >= 3 and len(composite_scores) >= 2 and budget.n_candidates == 1
                     and composite_scores[-1] > 0
                     and abs(composite_scores[-1] - composite_scores[-2]) / max(composite_scores[-1], 0.001) < 0.01):
                 best = self.ledger.best_round()
@@ -386,7 +386,7 @@ class Brain:
             # ── 7. 분기 ──
             v = verdict.get("verdict", "")
             retry_type = v
-            if v == "DONE" or iteration == MAX_ITERATIONS:
+            if (v == "DONE" and iteration >= 3) or iteration == MAX_ITERATIONS:
                 report = self._build_final_report(context, verdict, iteration)
                 D.print_final_report(report, verdict)
                 return report

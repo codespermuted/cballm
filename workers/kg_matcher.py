@@ -304,16 +304,19 @@ class KGMatcher:
 
         # ── Complexity Score (0~1) ──
         complexity = 0.0
-        # 비정상: RevIN으로 처리 가능하면 복잡도 낮음
+        # 비정상
         if not is_stat:
-            complexity += 0.05  # 비정상 자체는 낮은 기여
-        # 이분산성: regime 불안정 + 높은 seg_var일 때만 의미
-        if not regime_stable and seg_var > 5.0:
-            complexity += 0.25  # 진짜 변동성
-        elif not regime_stable:
+            complexity += 0.05
+        # 이분산성: seg_var 절대값이 높으면 regime과 무관하게 기여
+        if seg_var > 10.0:
+            complexity += 0.2
+        elif seg_var > 5.0:
+            complexity += 0.1
+        # regime 불안정은 추가 기여
+        if not regime_stable:
             complexity += 0.15
-        # heavy tail
-        if kurtosis > 6.0:
+        # heavy tail (kurtosis 또는 tail_index)
+        if kurtosis > 6.0 or tail_idx > 0.03:
             complexity += 0.15
         # 다변량 (많은 변수 + 상관 높음)
         if n_features > 10 and n_high_corr >= 10:
@@ -439,17 +442,18 @@ class KGMatcher:
                                    "confidence": ch_conf, "reason": ch_reason}
 
         # ── Q6: Head ──
-        if level == "complex" and kurtosis > 6.0 and tail_idx > 0.02:
+        if tail_idx > 0.03 or (kurtosis > 5.0 and tail_idx > 0.02):
             slots["head"] = {"recommended": "DistributionalHead", "options": ["LinearHead", "DistributionalHead"],
-                              "confidence": "medium", "reason": f"heavy tail(kurt={kurtosis:.1f})"}
+                              "confidence": "medium", "reason": f"tail_idx={tail_idx:.3f}, kurt={kurtosis:.1f}"}
         else:
             slots["head"] = {"recommended": "LinearHead", "options": ["LinearHead", "DistributionalHead"],
                               "confidence": "high", "reason": "기본"}
 
         # ── Q7: Loss ──
         extreme_ratio = profile.get("extreme_ratio", 1.0)
-        if extreme_ratio > 3.0:
-            loss_rec, loss_reason = "Asymmetric", f"극단비율={extreme_ratio:.1f}"
+        if seg_var > 5.0 or extreme_ratio > 1.5:
+            loss_rec = "Asymmetric"
+            loss_reason = f"seg_var={seg_var:.1f}, 극단구간 보호"
         elif skew > 2.0:
             loss_rec, loss_reason = "Huber", f"skew={skew:.2f}"
         else:
