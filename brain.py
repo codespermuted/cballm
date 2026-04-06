@@ -251,7 +251,13 @@ class Brain:
             # ── 4. 순차 학습 (config_dict 직접 전달) ──
             train_data_path = data_path if self.benchmark_mode else (
                 feature_path if Path(feature_path).exists() else data_path)
-            val_sub = "A" if iteration % 2 == 1 else "B"
+            # val_split: val 크기 2000 미만이면 full (소형 데이터 보호)
+            val_sub = "full"
+            if self.benchmark_mode:
+                n_rows = scout_profile_dict.get("n_rows", 0)
+                estimated_val = n_rows // 5  # 대략 val 크기 추정
+                if estimated_val >= 2000:
+                    val_sub = "A" if iteration % 2 == 1 else "B"
             round_best = None  # (mae, config, trainer_result, diag, metrics)
 
             for ci, cand in enumerate(candidates):

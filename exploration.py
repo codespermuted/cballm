@@ -202,8 +202,19 @@ class CandidateGenerator:
                        diagnosis, ledger) -> dict | None:
         """Diagnosis 기반 explore 후보. 약한 슬롯을 교체."""
         if not diagnosis or not hasattr(diagnosis, 'diagnosis'):
-            # 첫 라운드: encoder를 다른 것으로
+            # 첫 라운드: KG 추천과 다른 temporal_mixer 시도
             config = copy.deepcopy(base_config)
+            mix_opts = slot_recs.get("temporal_mixer", {}).get("options", [])
+            current_mix = base_config.get("temporal_mixer", {}).get("type", "") if isinstance(base_config.get("temporal_mixer"), dict) else ""
+            # MambaMix가 옵션에 있으면 우선 시도
+            for priority in ["MambaMix", "ConvMix", "MLPMix"]:
+                if priority in mix_opts and priority != current_mix:
+                    config["temporal_mixer"] = {"type": priority}
+                    if priority == "MambaMix":
+                        config["temporal_mixer"]["state_dim"] = 16
+                        config["temporal_mixer"]["n_layers"] = 2
+                    return config
+            # mixer 변경 불가 → encoder 변경
             enc_opts = slot_recs.get("encoder", {}).get("options", [])
             current_enc = base_config.get("encoder", {}).get("type", "")
             for alt in enc_opts:
