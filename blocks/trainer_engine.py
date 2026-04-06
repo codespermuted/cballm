@@ -156,8 +156,9 @@ STANDARD_SPLITS = {
     "weather": (25750, 29394, 36792),
     # ECL (Electricity): 26304 rows, 7:1:2
     "ECL": (18412, 21044, 26304),
-    # SMP hourly: 98232 rows, last 2 months test (~1441), val = 2 months before that
-    "smp_hourly": (94909, 96791, 98232),
+    # SMP hourly: 98232 rows, 실전 DA 기준
+    # train: ~2025-12-16 (96048행), val: 1개월 (744행), test: 2개월 (1440행)
+    "smp_hourly": (96048, 96792, 98232),
     # Weather: 52696 rows, 7:1:2
     "weather": (36887, 42128, 52696),
     # Exchange: 7588 rows, 7:1:2
