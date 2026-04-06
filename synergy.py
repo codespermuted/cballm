@@ -65,15 +65,22 @@ class SynergyChecker:
             corrected["temporal_mixer"] = {"type": "LinearMix"}
             rules.append("ANTAG-02: FourierEmb+FrequencyMix → LinearMix (frequency 중복)")
 
-        # DistributionalHead + MAE/MSE → 해당 분포 NLL로
-        if head == "DistributionalHead" and loss in ("MAE", "MSE"):
+        # DistributionalHead + any point loss → NLL (범용 수학 규칙)
+        # DistHead는 mean+std를 출력하는데 point loss는 std를 학습시키지 않음
+        POINT_LOSSES = {"MAE", "MSE", "Asymmetric", "Huber", "Quantile", "SmoothnessReg"}
+        NLL_LOSSES = {"GaussianNLL", "StudentTNLL", "LogNormalNLL", "MixtureGaussianNLL"}
+        if head == "DistributionalHead" and loss in POINT_LOSSES:
             dist = corrected.get("head", {}).get("distribution", "gaussian")
             nll_map = {
                 "gaussian": "GaussianNLL", "student_t": "StudentTNLL",
                 "log_normal": "LogNormalNLL", "mixture_gaussian": "MixtureGaussianNLL",
             }
             corrected["loss"] = {"type": nll_map.get(dist, "GaussianNLL")}
-            rules.append(f"ANTAG-03: DistHead+{loss} → {nll_map.get(dist)} (분포 출력+point loss 모순)")
+            rules.append(f"ANTAG-03: DistHead+{loss} → {nll_map.get(dist)} (point loss는 std 미학습)")
+        # 반대: NLL인데 LinearHead → NLL을 MAE로 다운그레이드
+        elif head == "LinearHead" and loss in NLL_LOSSES:
+            corrected["loss"] = {"type": "MAE"}
+            rules.append(f"ANTAG-03b: LinearHead+{loss} → MAE (NLL은 분포 출력 필요)")
 
         # BatchInstanceNorm + RobustScaler → RobustScaler 제거
         if norm == "BatchInstanceNorm" and ch_mix == "RobustScaler":

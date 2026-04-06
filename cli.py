@@ -40,6 +40,11 @@ def main():
         help="API 키 (미지정 시 ANTHROPIC_API_KEY 또는 OPENAI_API_KEY 환경변수 사용)",
     )
 
+    parser.add_argument(
+        "--prior", default="",
+        help="도메인 prior yaml 파일 경로 (예: domain_priors/energy_smp.yaml)",
+    )
+
     args = parser.parse_args()
 
     # ── 엔진 설정 ──

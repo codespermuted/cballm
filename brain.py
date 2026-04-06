@@ -108,10 +108,20 @@ class Brain:
     Scout → KG → [PreHook → Architect → Engineer → Trainer → PostHook → Critic] × N
     """
 
-    def __init__(self, cwd: str, rules_dir: str = "", benchmark_mode: bool = False):
+    def __init__(self, cwd: str, rules_dir: str = "", benchmark_mode: bool = False,
+                 prior_path: str = ""):
         self.cwd = cwd
         self.benchmark_mode = benchmark_mode
         self.all_rules = load_rules(rules_dir) if rules_dir else {}
+
+        # Domain prior 로딩
+        from cballm.domain_prior import load_domain_prior
+        if prior_path:
+            self.domain_prior = load_domain_prior(prior_path=prior_path)
+        else:
+            self.domain_prior = load_domain_prior(prior_dir=Path(cwd) / "domain_priors")
+        if self.domain_prior:
+            print(f"  Domain Prior: {self.domain_prior.domain}")
         self.session = WorkerSession(
             worker_name="brain",
             system_prompt=ORCHESTRATOR_PROMPT,
@@ -221,6 +231,13 @@ class Brain:
             seen = set()
             checked = []
             for c in candidates:
+                # 1. Domain prior 먼저 (도메인 의도 반영)
+                if self.domain_prior:
+                    from cballm.domain_prior import apply_prior_to_config
+                    c.config, prior_rules = apply_prior_to_config(c.config, self.domain_prior)
+                    if prior_rules:
+                        print(f"  Prior: {', '.join(prior_rules)}")
+                # 2. SynergyChecker 나중에 (수학적 일관성 보장)
                 sr = SynergyChecker.validate(c.config, scout_profile_dict)
                 if sr.applied_rules:
                     print(f"  Synergy: {', '.join(sr.applied_rules)}")

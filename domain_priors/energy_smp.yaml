@@ -1,0 +1,37 @@
+# SMP (System Marginal Price) 도메인 Prior
+# CBALLM domain prior injection: KG가 이 파일을 읽어서 추천에 반영
+
+domain: "한국 전력시장 SMP"
+description: "실시간/하루전 전력시장 한계가격 예측"
+
+priors:
+  observational:
+    - key: "positivity"
+      rule: "SMP는 0원 이하 가능 (음의 SMP 발생). Positivity constraint 금지."
+    - key: "seasonality"
+      rule: "일간(24h)/주간(168h) 강한 주기성. 공휴일 효과 큼."
+    - key: "spike_crash"
+      rule: "전체의 3-5%가 극단값(spike/crash). crash는 재생에너지 과잉 시 발생."
+    - key: "cross_correlation"
+      rule: "육지-제주 HVDC 연결로 SMP 상관 높음. 동시 예측이 유리할 수 있음."
+
+  inductive:
+    - key: "loss"
+      rule: "AsymmetricLoss 권장. 과소예측(under) 페널티 > 과대예측(over)."
+      config_override:
+        loss: {"type": "Asymmetric", "under_weight": 2.0}
+    - key: "peak_hours"
+      rule: "피크 시간대(08-11, 17-20) 예측이 실전에서 가장 중요."
+    - key: "demand_feature"
+      rule: "demand_land, demand_jeju가 SMP의 핵심 예측 변수."
+
+  learning:
+    - key: "model_scale"
+      rule: "98K행 대형 데이터. d_model >= 128, warmup >= 10 권장."
+      config_override:
+        encoder: {"d_model_min": 128}
+    - key: "constraint"
+      rule: "Positivity 금지 (음의 SMP 가능). VolatilityGate 권장 (seg_var > 25)."
+      config_override:
+        constraint_blacklist: ["Positivity"]
+        constraint_recommend: ["VolatilityGate"]
