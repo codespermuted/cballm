@@ -106,7 +106,61 @@ class RobustScaler(BaseNormalizer):
         return pred * iqr + median
 
 
+class BatchInstanceNorm(BaseNormalizer):
+    """Batch-Instance Normalization — BN/IN learnable interpolation.
+
+    gate = sigmoid(rho)
+    output = gate * BN(x) + (1-gate) * IN(x)
+
+    RevIN 대비 배치 통계를 함께 활용.
+    배치 간 분포가 유사하면 BN이 유리, instance마다 다르면 IN이 유리.
+    학습 가능한 gate가 자동으로 최적 비율을 결정.
+    """
+
+    def __init__(self, n_features: int, eps: float = 1e-5):
+        super().__init__()
+        self.n_features = n_features
+        self.eps = eps
+
+        # learnable interpolation parameter
+        self.rho = nn.Parameter(torch.zeros(1, 1, n_features))
+
+        # BatchNorm (time축 기준)
+        self.bn = nn.BatchNorm1d(n_features, eps=eps)
+
+        # reverse용 통계 저장
+        self._mean: torch.Tensor | None = None
+        self._std: torch.Tensor | None = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, C)
+        # instance statistics
+        self._mean = x.mean(dim=1, keepdim=True).detach()
+        self._std = (x.std(dim=1, keepdim=True) + self.eps).detach()
+        x_in = (x - self._mean) / self._std
+
+        # batch statistics (BatchNorm1d expects (B, C, T))
+        x_bn = self.bn(x.permute(0, 2, 1)).permute(0, 2, 1)
+
+        # interpolation
+        gate = torch.sigmoid(self.rho)
+        return gate * x_bn + (1.0 - gate) * x_in
+
+    def reverse(self, pred: torch.Tensor, target_idx: int | None = None) -> torch.Tensor:
+        """역변환 — instance 통계 기준으로 복원."""
+        if self._mean is None or self._std is None:
+            return pred
+        if target_idx is not None:
+            mean = self._mean[:, :, target_idx:target_idx + 1]
+            std = self._std[:, :, target_idx:target_idx + 1]
+        else:
+            mean = self._mean
+            std = self._std
+        return pred * std + mean
+
+
 NORMALIZER_REGISTRY: dict[str, type[BaseNormalizer]] = {
     "RevIN": RevIN,
     "RobustScaler": RobustScaler,
+    "BatchInstanceNorm": BatchInstanceNorm,
 }

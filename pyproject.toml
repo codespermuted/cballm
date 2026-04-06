@@ -17,5 +17,8 @@ dependencies = [
 [project.scripts]
 cballm = "cballm.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["cballm*"]
+[tool.setuptools.packages]
+find = {where = [".."]}
+
+[tool.setuptools.package-dir]
+"" = ".."

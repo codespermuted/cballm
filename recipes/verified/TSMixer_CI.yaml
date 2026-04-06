@@ -10,9 +10,14 @@ blocks:
   channel_mixer: null
   head: LinearHead
 
+d_model: 64
+
 encoder_config:
   patch_len: 16
   stride: 8
+
+hp_constraints:
+  d_model: {min: 32, max: 256}
 
 hp:
   lr: 1.0e-4

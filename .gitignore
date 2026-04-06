@@ -4,3 +4,10 @@ __pycache__/
 dist/
 build/
 cortex_report.json
+cballm_report.json
+cballm_etth1_*.json
+benchmark_*.json
+multi_benchmark*.json
+results/
+benchmark_data/*.parquet
+benchmark_data/*_features.csv

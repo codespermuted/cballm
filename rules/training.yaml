@@ -1,4 +1,5 @@
-# Training Stability Rules
+# Training Stability Rules (보강판)
+# v2.1: scheduler/warmup 추가, backbone별 차등, 적응형 patience
 
 rules:
   TRAIN-001:
@@ -13,27 +14,121 @@ rules:
     description: "val 대비 test 성능 2배 이상 나쁘면 분포 차이 경고."
     enforcement: "Critic 비교"
 
+  TRAIN-004:
+    description: "Attention/Patch 계열은 warmup 필수. 초기 gradient 불안정 방지."
+    enforcement: "Trainer가 capacity=high일 때 자동 적용"
+
+  TRAIN-005:
+    description: "학습 중 lr이 min_lr 이하로 떨어지면 early stop 직전 상태."
+    enforcement: "Trainer 모니터링"
+
+  TRAIN-006:
+    description: "n_rows < 2000이면 weight_decay 높이고 dropout 강화."
+    enforcement: "Trainer가 데이터 크기 기반 자동 조정"
+
 hp_presets:
   minimal:
+    description: "LinearMix 등 최소 capacity 블록"
     lr: 1.0e-3
+    min_lr: 1.0e-5
     epochs: 50
     patience: 10
     weight_decay: 1.0e-4
+    scheduler: "plateau"
+    scheduler_config:
+      factor: 0.5
+      patience: 5
+    warmup_epochs: 0
+    gradient_clip: null
 
   low:
+    description: "MLPMix, FourierEmbedding 등 low capacity"
     lr: 5.0e-4
+    min_lr: 1.0e-5
     epochs: 100
     patience: 15
     weight_decay: 1.0e-5
+    scheduler: "cosine"
+    scheduler_config:
+      T_max: 100
+      eta_min: 1.0e-5
+    warmup_epochs: 3
+    gradient_clip: 1.0
 
   medium:
+    description: "GatedMLPMix, ConvMix, PatchMLPMix, RecurrentMix"
     lr: 1.0e-4
+    min_lr: 1.0e-6
     epochs: 100
     patience: 15
     weight_decay: 1.0e-5
+    scheduler: "cosine"
+    scheduler_config:
+      T_max: 100
+      eta_min: 1.0e-6
+    warmup_epochs: 5
+    gradient_clip: 1.0
 
   high:
+    description: "AttentionMix, PatchAttentionMix, InvertedAttentionMix"
     lr: 1.0e-4
+    min_lr: 1.0e-6
     epochs: 200
     patience: 20
     weight_decay: 1.0e-5
+    scheduler: "cosine_warmup"
+    scheduler_config:
+      T_max: 200
+      eta_min: 1.0e-6
+    warmup_epochs: 10
+    gradient_clip: 1.0
+
+# 데이터 크기 기반 보정 (hp_preset 위에 오버라이드)
+data_size_adjustments:
+  small:
+    condition: "n_rows < 2000"
+    overrides:
+      weight_decay: 5.0e-4
+      epochs: 50
+      patience: 8
+    note: "소규모 데이터 → 정규화 강화, 빠른 수렴"
+
+  medium:
+    condition: "2000 <= n_rows < 10000"
+    overrides: {}
+    note: "기본 preset 그대로"
+
+  large:
+    condition: "10000 <= n_rows < 50000"
+    overrides:
+      epochs: 150
+      patience: 20
+    note: "대규모 → 더 긴 학습"
+
+  very_large:
+    condition: "n_rows >= 50000"
+    overrides:
+      epochs: 200
+      patience: 25
+      lr: 5.0e-5
+    note: "초대규모 → lr 낮추고 긴 학습"
+
+# Scheduler 설명
+scheduler_types:
+  plateau:
+    description: "val loss가 patience epoch 동안 개선 없으면 lr *= factor"
+    torch_class: "torch.optim.lr_scheduler.ReduceLROnPlateau"
+    best_for: ["minimal capacity", "simple models"]
+
+  cosine:
+    description: "Cosine annealing: lr을 T_max까지 eta_min으로 감소"
+    torch_class: "torch.optim.lr_scheduler.CosineAnnealingLR"
+    best_for: ["medium capacity", "MLP/Conv models"]
+
+  cosine_warmup:
+    description: "Linear warmup + Cosine annealing"
+    implementation: |
+      warmup: lr을 0에서 base_lr까지 warmup_epochs 동안 선형 증가
+      main: warmup 이후 CosineAnnealing
+    torch_class: "torch.optim.lr_scheduler.SequentialLR"
+    best_for: ["high capacity", "Attention models"]

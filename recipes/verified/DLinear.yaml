@@ -10,11 +10,16 @@ blocks:
   channel_mixer: null
   head: LinearHead
 
+d_model: 64
+
 hp:
   lr: 1.0e-3
   epochs: 50
   patience: 10
   weight_decay: 1.0e-4
+
+hp_constraints:
+  d_model: {min: 16, max: 256}
 
 benchmark:
   ETTh1: 0.386

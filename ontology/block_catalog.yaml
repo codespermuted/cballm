@@ -1,9 +1,29 @@
-# CBALLM v2 Block Catalog — Single Source of Truth
+# CBALLM v2.1 Block Catalog — Single Source of Truth
 # 모든 블록 정의는 이 파일에만 존재한다.
+#
+# v2.1: category 메타데이터 추가.
+# DiversityLedger가 "아직 안 쓴 카테고리"를 추천할 때 사용.
+#
+# category 분류 체계:
+#   normalization  — 분포 정규화, 스케일링
+#   embedding      — 입력 → 잠재 공간 변환
+#   frequency      — 주파수 도메인 처리
+#   attention      — self/cross attention 기반
+#   mlp            — MLP/feedforward 기반
+#   convolution    — Conv 기반 (local pattern)
+#   recurrence     — RNN/LSTM/GRU 기반
+#   gating         — gating mechanism
+#   projection     — 차원 축소/확대
+#   constraint     — 물리/도메인 제약
+#   loss           — 손실 함수
+#   trend          — (미구현) 추세 분리
+#   volatility     — (미구현) 변동성 처리
+#   decomposition  — (미구현) 시계열 분해
 
 normalizer:
   RevIN:
     source: "Kim et al., 2022 (ICLR)"
+    category: normalization
     primitive: instance_norm
     shape: "(B,T,C) → (B,T,C)"
     has_reverse: true
@@ -20,6 +40,7 @@ normalizer:
 
   RobustScaler:
     source: "sklearn"
+    category: normalization
     primitive: statistical_norm
     shape: "(B,T,C) → (B,T,C)"
     has_reverse: true
@@ -33,6 +54,7 @@ normalizer:
 
   DatasetNorm:
     source: "built-in"
+    category: normalization
     primitive: statistical_norm
     shape: "(B,T,C) → (B,T,C)"
     has_reverse: true
@@ -44,6 +66,7 @@ normalizer:
 encoder:
   LinearProjection:
     source: "DLinear (Zeng et al., 2023)"
+    category: embedding
     primitive: Linear
     shape: "(B,T,C) → (B,T,d_model)"
     params: "C × d_model"
@@ -56,6 +79,7 @@ encoder:
 
   PatchEmbedding:
     source: "PatchTST (Nie et al., 2023, ICLR)"
+    category: embedding
     primitive: Convolution
     shape: "(B,T,C) → (B,n_patch,d_model)"
     params: "C × patch_len × d_model"
@@ -72,6 +96,7 @@ encoder:
 
   FourierEmbedding:
     source: "FEDformer (Zhou et al., 2022)"
+    category: [embedding, frequency]
     primitive: Fourier
     shape: "(B,T,C) → (B,T,d_model)"
     capacity: low
@@ -86,6 +111,7 @@ encoder:
 temporal_mixer:
   LinearMix:
     source: "DLinear (Zeng et al., 2023, AAAI)"
+    category: projection
     primitive: Linear
     shape: "(B,T,d_model) → (B,H,d_model)"
     capacity: minimal
@@ -98,6 +124,7 @@ temporal_mixer:
 
   MLPMix:
     source: "TSMixer TMix-Only (Chen et al., 2023)"
+    category: mlp
     primitive: MLP
     shape: "(B,T,d_model) → (B,H,d_model)"
     capacity: low
@@ -113,6 +140,7 @@ temporal_mixer:
 
   GatedMLPMix:
     source: "TSMixer IC (Ekambaram et al., 2023, KDD)"
+    category: [mlp, gating]
     primitive: "MLP + Gating"
     shape: "(B,T,d_model) → (B,H,d_model)"
     capacity: medium
@@ -127,6 +155,7 @@ temporal_mixer:
 
   PatchMLPMix:
     source: "TSMixer CI (Chen et al., 2023)"
+    category: mlp
     primitive: MLP
     shape: "(B,n_patch,d_model) → (B,H,d_model)"
     capacity: medium
@@ -141,6 +170,7 @@ temporal_mixer:
 
   AttentionMix:
     source: "Vanilla Transformer"
+    category: attention
     primitive: Attention
     shape: "(B,T,d_model) → (B,H,d_model)"
     capacity: high
@@ -156,6 +186,7 @@ temporal_mixer:
 
   PatchAttentionMix:
     source: "PatchTST (Nie et al., 2023, ICLR)"
+    category: attention
     primitive: Attention
     shape: "(B,n_patch,d_model) → (B,H,d_model)"
     capacity: high
@@ -174,6 +205,7 @@ temporal_mixer:
 
   ConvMix:
     source: "TimesNet (Wu et al., 2023, ICLR)"
+    category: convolution
     primitive: Convolution
     shape: "(B,T,d_model) → (B,H,d_model)"
     capacity: medium
@@ -189,6 +221,7 @@ temporal_mixer:
 
   RecurrentMix:
     source: "DeepAR (Salinas et al., 2020)"
+    category: recurrence
     primitive: Recurrence
     shape: "(B,T,d_model) → (B,H,d_model)"
     capacity: medium
@@ -207,6 +240,7 @@ channel_mixer:
 
   FeatureMLPMix:
     source: "TSMixer IC (Ekambaram et al., 2023)"
+    category: mlp
     primitive: MLP
     shape: "(B,H,d_model) → (B,H,d_model)"
     config:
@@ -218,6 +252,7 @@ channel_mixer:
 
   InvertedAttentionMix:
     source: "iTransformer (Liu et al., 2024, ICLR)"
+    category: attention
     primitive: "Attention (변수축)"
     shape: "(B,H,d_model) → (B,H,d_model)"
     config:
@@ -287,3 +322,89 @@ loss:
     use_conditions:
       - "extreme_ratio > 2.0"
     prior_hint: "under_weight = extreme_ratio로 설정하면 직관적"
+
+  GaussianNLL:
+    category: loss
+    source: "built-in"
+    note: "DistributionalHead와 연동. 확률 예측 시 사용."
+    use_when: "불확실성 추정이 필요할 때. DistributionalHead 필수."
+
+# ──────────────────────────────────────────────
+# v2.1 신규 블록
+# ──────────────────────────────────────────────
+
+decomposition:
+  MovingAvgDecomp:
+    source: "DLinear (Zeng et al., 2023)"
+    category: decomposition
+    primitive: AvgPool
+    shape: "(B,T,C) → (seasonal:(B,T,C), trend:(B,T,C))"
+    config:
+      kernel_size: {type: int, range: [3, 101], default: 25, desc: "dominant_period 또는 25"}
+    use_conditions:
+      - "has_strong_seasonality == true"
+      - "is_stationary == false"
+    avoid_when: "추세 없고 주기성도 약한 정상 데이터"
+    prior_hint: "DLinear 핵심. trend/seasonal 분리 후 각각 LinearMix → 합산."
+
+# VolatilityGate는 constraint 섹션에 추가
+# (constraint 섹션 위에 이미 등록된 블록들 뒤에)
+
+constraint_v21:
+  VolatilityGate:
+    source: "built-in"
+    category: volatility
+    primitive: "Gate (Sigmoid)"
+    shape: "(B,H,output_dim) → (B,H,output_dim)"
+    config:
+      window: {type: int, range: [3, 96], default: 24, desc: "rolling std 윈도우. pred_len 연동 권장."}
+      mode: {type: str, options: [dampen, amplify], default: dampen}
+    use_conditions:
+      - "segment_variance_ratio > 3.0"
+      - "regime_stable == false"
+    avoid_when: "분산이 균일한 정상 데이터"
+    prior_hint: "Diagnosis에서 add_volatility_block 시 자동 추천."
+
+# FrequencyMix는 temporal_mixer 섹션에 해당하지만 catalog 구조상 여기 추가
+temporal_mixer_v21:
+  FrequencyMix:
+    source: "FEDformer (Zhou et al., 2022) simplified"
+    category: frequency
+    primitive: "FFT + learnable weight"
+    shape: "(B,T,d_model) → (B,H,d_model)"
+    capacity: medium
+    min_data: 3000
+    config:
+      top_k: {type: int, range: [1, 20], default: 5, desc: "small(<5k):3, large(>10k):8"}
+    use_conditions:
+      - "has_strong_seasonality == true"
+      - "n_rows >= 3000"
+    avoid_when: "주기성 약한 데이터 (max ACF<0.3)"
+    prior_hint: "주기성이 시변(time-varying)하는 데이터에서 효과적."
+
+normalizer_v21:
+  BatchInstanceNorm:
+    source: "Nam & Kim, 2018"
+    category: normalization
+    primitive: "BN/IN interpolation"
+    shape: "(B,T,C) → (B,T,C)"
+    has_reverse: true
+    config: {}
+    use_conditions:
+      - "batch_size >= 16"
+    avoid_when: "batch_size < 8 (BN 통계 불안정)"
+    stacks_with: DatasetNorm
+    conflicts_with: [RevIN, RobustScaler]
+    prior_hint: "RevIN 대안. 배치 간 분포 유사할 때 유리."
+
+head_v21:
+  DistributionalHead:
+    source: "built-in"
+    category: head
+    primitive: "Linear(mean) + Softplus(Linear(std))"
+    shape: "(B,H,d_model) → (B,H,output_dim) or ((B,H,out), (B,H,out))"
+    config:
+      point_forecast: {type: bool, default: true, desc: "true면 mean만 반환 (기존 호환)"}
+    use_when: "불확실성 추정 필요. prediction interval 출력."
+    requires_loss: GaussianNLL
+    prior_hint: "point_forecast=true면 LinearHead와 동일 동작."

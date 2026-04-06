@@ -46,6 +46,18 @@ class DataProfile:
     regime_stable: bool
     n_regime_changes: int
 
+    # 분포 특성 (v2.1)
+    target_kurtosis: float
+    tail_index: float            # |z| > 3인 비율
+    jarque_bera_pvalue: float    # 정규성 검정 p-value
+    segment_variance_ratio: float  # 구간별 분산 비 (max/min) — VolatilityGate 추천 기준
+
+    # 다변량 통계 (v2.1)
+    pairwise_corr_mean: float       # 변수 간 평균 |상관|
+    pairwise_corr_max: float        # 최대 상관 쌍의 |r|
+    n_high_corr_pairs: int          # |corr| > 0.7인 쌍 수
+    granger_significant_count: int  # target에 Granger 유의한 변수 수
+
     # 추천
     recommended_lags: list[int]
 
@@ -83,9 +95,31 @@ class DataProfile:
                          sorted(self.exog_correlations.items(), key=lambda x: -abs(x[1]))[:5]]
             lines.append(f"Exogenous ranking: [{', '.join(exog_parts)}]")
 
+        # 다변량 통계
+        lines.append(
+            f"Multivariate: pairwise_corr_mean={self.pairwise_corr_mean:.3f}, "
+            f"pairwise_corr_max={self.pairwise_corr_max:.3f}, "
+            f"n_high_corr_pairs={self.n_high_corr_pairs}, "
+            f"granger_significant={self.granger_significant_count}"
+        )
+
         # Regime
         regime_status = "stable" if self.regime_stable else f"unstable ({self.n_regime_changes} changes)"
         lines.append(f"Regime: {regime_status}")
+
+        # 분포 특성
+        lines.append(
+            f"Distribution: kurtosis={self.target_kurtosis:.2f}, "
+            f"tail_index={self.tail_index:.4f}, "
+            f"jarque_bera_p={self.jarque_bera_pvalue:.4f}, "
+            f"segment_variance_ratio={self.segment_variance_ratio:.2f}"
+        )
+        if self.jarque_bera_pvalue > 0.05:
+            lines.append("  -> 정규성 기각 못함 (gaussian 적합)")
+        elif self.target_kurtosis > 5 and self.tail_index > 0.02:
+            lines.append("  -> heavy tail 감지 (student_t 권장)")
+        elif not self.target_can_be_negative and self.target_skew > 0.5:
+            lines.append("  -> 양수 + right skew (log_normal 권장)")
 
         lines.append(f"Recommended lags: {self.recommended_lags}")
         lines.append("=== END PROFILE ===")
@@ -179,6 +213,15 @@ class Scout:
         # Regime detection (rolling std 변화)
         regime_stable, n_changes = self._regime_check(target_clean, freq_hours)
 
+        # 분포 특성 (v2.1)
+        kurtosis = round(float(pd.Series(target_clean).kurtosis()), 4)
+        tail_index = self._tail_index(target_clean)
+        jb_pvalue = self._jarque_bera(target_clean)
+        seg_var_ratio = self._segment_variance_ratio(target_clean)
+
+        # 다변량 통계 (v2.1)
+        pw_mean, pw_max, n_high, granger_n = self._multivariate_stats(df, cols, target_col)
+
         # 추천 lags
         recommended_lags = self._recommend_lags(seasonality, pred_len)
 
@@ -196,6 +239,14 @@ class Scout:
             seasonality=seasonality, dominant_period=dominant,
             exog_correlations=exog_corr, top_exog=top_exog,
             regime_stable=regime_stable, n_regime_changes=n_changes,
+            target_kurtosis=kurtosis,
+            tail_index=tail_index,
+            jarque_bera_pvalue=jb_pvalue,
+            segment_variance_ratio=seg_var_ratio,
+            pairwise_corr_mean=pw_mean,
+            pairwise_corr_max=pw_max,
+            n_high_corr_pairs=n_high,
+            granger_significant_count=granger_n,
             recommended_lags=recommended_lags,
         )
 
@@ -303,6 +354,105 @@ class Scout:
             lags.add(pred_len)
 
         return sorted(lags)
+
+    @staticmethod
+    def _multivariate_stats(df: pd.DataFrame, cols: list[str],
+                            target_col: str) -> tuple[float, float, int, int]:
+        """다변량 통계 계산.
+
+        Returns: (pairwise_corr_mean, pairwise_corr_max, n_high_corr_pairs, granger_count)
+        """
+        numeric_cols = [c for c in cols if df[c].dtype in [np.float64, np.int64, float, int]]
+        n = len(numeric_cols)
+
+        if n < 2:
+            return 0.0, 0.0, 0, 0
+
+        # pairwise correlation
+        corr_matrix = df[numeric_cols].corr().abs()
+        # 대각선 제외
+        mask = np.triu(np.ones_like(corr_matrix, dtype=bool), k=1)
+        upper = corr_matrix.where(mask)
+        pw_values = upper.values[mask]
+        pw_values = pw_values[~np.isnan(pw_values)]
+
+        pw_mean = round(float(pw_values.mean()), 4) if len(pw_values) > 0 else 0.0
+        pw_max = round(float(pw_values.max()), 4) if len(pw_values) > 0 else 0.0
+        n_high = int((pw_values > 0.7).sum()) if len(pw_values) > 0 else 0
+
+        # Granger causality (변수 20개 이하일 때만)
+        granger_n = 0
+        if n <= 20 and target_col in numeric_cols:
+            try:
+                from statsmodels.tsa.stattools import grangercausalitytests
+                target_series = df[target_col].values
+                for c in numeric_cols:
+                    if c == target_col:
+                        continue
+                    try:
+                        data = np.column_stack([target_series[:2000], df[c].values[:2000]])
+                        # NaN 제거
+                        valid = ~np.isnan(data).any(axis=1)
+                        data = data[valid]
+                        if len(data) < 50:
+                            continue
+                        result = grangercausalitytests(data, maxlag=4, verbose=False)
+                        # 어느 lag에서든 p < 0.05이면 유의
+                        for lag, test in result.items():
+                            p = test[0]["ssr_ftest"][1]
+                            if p < 0.05:
+                                granger_n += 1
+                                break
+                    except Exception:
+                        pass
+            except ImportError:
+                pass  # statsmodels 없으면 skip
+
+        return pw_mean, pw_max, n_high, granger_n
+
+    @staticmethod
+    def _segment_variance_ratio(target: np.ndarray, n_segments: int = 4) -> float:
+        """구간별 분산 비 (max/min). VolatilityGate 추천 기준."""
+        n = len(target)
+        if n < n_segments * 10:
+            return 1.0
+        seg_size = n // n_segments
+        variances = []
+        for i in range(n_segments):
+            seg = target[i * seg_size:(i + 1) * seg_size]
+            v = np.var(seg)
+            if v > 0:
+                variances.append(v)
+        if len(variances) < 2 or min(variances) == 0:
+            return 1.0
+        return round(float(max(variances) / min(variances)), 2)
+
+    @staticmethod
+    def _tail_index(target: np.ndarray) -> float:
+        """극단값 빈도: |z-score| > 3인 비율. heavy tail 지표."""
+        std = np.std(target)
+        if std == 0:
+            return 0.0
+        z = np.abs((target - np.mean(target)) / std)
+        return round(float((z > 3).mean()), 4)
+
+    @staticmethod
+    def _jarque_bera(target: np.ndarray) -> float:
+        """Jarque-Bera 정규성 검정. p > 0.05면 정규성 기각 못함."""
+        try:
+            from scipy.stats import jarque_bera
+            _, p = jarque_bera(target[:5000])
+            return round(float(p), 6)
+        except ImportError:
+            # scipy 없으면 간이 판정: skew와 kurtosis로 추정
+            n = len(target)
+            s = pd.Series(target)
+            skew = s.skew()
+            kurt = s.kurtosis()
+            jb = n / 6 * (skew ** 2 + kurt ** 2 / 4)
+            # chi-squared df=2 근사
+            p_approx = max(0.0, 1.0 - jb / (jb + 6))
+            return round(p_approx, 6)
 
     @staticmethod
     def _extract(text: str, field: str) -> str | None:

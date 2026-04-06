@@ -208,6 +208,63 @@ class RecurrentMix(BaseTemporalMixer):
         return out.permute(0, 2, 1)      # (B, H, d_model)
 
 
+class FrequencyMix(BaseTemporalMixer):
+    """FEDformer 단순화 — frequency domain에서 top-k 성분만 선택+가중 mixing.
+
+    FFT → top-k frequency 선택 → learnable weight 적용 → iFFT → Linear(T→H).
+    주기성이 시간에 따라 변하는 데이터에 유효.
+
+    k 가이드: small data(n_rows<5000) → k=3, large → k=8
+    """
+
+    def __init__(self, seq_len: int, pred_len: int, d_model: int,
+                 top_k: int = 5, **kwargs):
+        super().__init__()
+        self.top_k = top_k
+        self.d_model = d_model
+        self.n_freq = seq_len // 2 + 1
+
+        # frequency domain에서의 learnable complex weight
+        # 전체 frequency bin에 대한 weight (top-k만 활성화됨)
+        self.freq_weight = nn.Parameter(torch.ones(self.n_freq, d_model))
+
+        # time domain projection: T → H
+        self.temporal_proj = nn.Linear(seq_len, pred_len)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, d_model)
+        B, T, D = x.shape
+
+        # FFT along time axis
+        x_freq = torch.fft.rfft(x, dim=1)  # (B, n_freq, d_model) complex
+
+        # top-k frequency selection by magnitude
+        magnitudes = x_freq.abs().mean(dim=-1)  # (B, n_freq)
+        # DC 성분 보존을 위해 masking에서 제외
+        mag_no_dc = magnitudes.clone()
+        mag_no_dc[:, 0] = 0
+        _, topk_idx = mag_no_dc.topk(self.top_k, dim=1)  # (B, top_k)
+
+        # top-k mask (DC 포함)
+        mask = torch.zeros_like(magnitudes)
+        mask[:, 0] = 1.0  # DC 보존
+        mask.scatter_(1, topk_idx, 1.0)
+
+        # learnable weight 적용 (non-inplace)
+        weighted_freq = x_freq * (mask.unsqueeze(-1) * self.freq_weight.unsqueeze(0))
+
+        # iFFT back to time domain
+        x_time = torch.fft.irfft(weighted_freq, n=T, dim=1)  # (B, T, d_model)
+
+        # residual connection
+        x_out = x + x_time
+
+        # T → H projection
+        x_out = x_out.permute(0, 2, 1)     # (B, d_model, T)
+        x_out = self.temporal_proj(x_out)   # (B, d_model, H)
+        return x_out.permute(0, 2, 1)       # (B, H, d_model)
+
+
 TEMPORAL_MIXER_REGISTRY: dict[str, type[BaseTemporalMixer]] = {
     "LinearMix": LinearMix,
     "MLPMix": MLPMix,
@@ -217,6 +274,7 @@ TEMPORAL_MIXER_REGISTRY: dict[str, type[BaseTemporalMixer]] = {
     "PatchAttentionMix": PatchAttentionMix,
     "ConvMix": ConvMix,
     "RecurrentMix": RecurrentMix,
+    "FrequencyMix": FrequencyMix,
     # v1 호환
     "Linear": LinearMix,
     "PatchMLP": PatchMLPMix,

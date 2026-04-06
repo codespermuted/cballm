@@ -80,17 +80,41 @@ class Trainer:
             # recipe name 추가
             exec_result = f"RECIPE: {recipe_name}\n{exec_result}"
 
+            # PostTrainHook용 진단 데이터 추출
+            val_residuals = result.val_residuals
+            train_loss_history = result.train_loss_history
+            val_loss_history = result.val_loss_history
+            val_mae_by_step = result.val_mae_by_step
+            val_predictions = result.val_predictions
+            best_epoch = result.best_epoch
+            # max_epochs: fold_results의 best_epoch 상한에서 추정
+            max_epochs = len(train_loss_history) if train_loss_history else 50
+
         except Exception as e:
             import traceback
             error_msg = traceback.format_exc()
             response = f"ERROR: {e}"
             exec_result = f"METRICS: {{}}\nBEST_MODEL: FAILED\n[STDERR]\n{error_msg}"
+            val_residuals = None
+            train_loss_history = []
+            val_loss_history = []
+            val_mae_by_step = []
+            val_predictions = None
+            best_epoch = 0
+            max_epochs = 50
 
         return {
             "worker": self.name,
             "response": response,
             "code": None,
             "execution_result": exec_result,
+            "val_residuals": val_residuals,
+            "train_loss_history": train_loss_history,
+            "val_loss_history": val_loss_history,
+            "val_mae_by_step": val_mae_by_step,
+            "val_predictions": val_predictions,
+            "best_epoch": best_epoch,
+            "max_epochs": max_epochs,
         }
 
     def _extract_field(self, text: str, field: str) -> str | None:

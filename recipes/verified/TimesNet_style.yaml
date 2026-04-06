@@ -10,10 +10,15 @@ blocks:
   channel_mixer: null
   head: LinearHead
 
+d_model: 64
+
 temporal_mixer_config:
   kernel_size: 7
   n_layers: 2
   dilation: exponential
+
+hp_constraints:
+  d_model: {min: 32, max: 128}
 
 hp:
   lr: 5.0e-4

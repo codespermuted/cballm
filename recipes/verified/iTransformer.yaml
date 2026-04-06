@@ -10,9 +10,14 @@ blocks:
   channel_mixer: InvertedAttentionMix
   head: LinearHead
 
+d_model: 64
+
 channel_mixer_config:
   n_heads: 4
   n_layers: 2
+
+hp_constraints:
+  d_model: {min: 32, max: 256}
 
 hp:
   lr: 1.0e-4

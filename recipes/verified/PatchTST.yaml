@@ -10,6 +10,8 @@ blocks:
   channel_mixer: null
   head: LinearHead
 
+d_model: 128
+
 encoder_config:
   patch_len: 16
   stride: 8
@@ -23,6 +25,10 @@ hp:
   epochs: 100
   patience: 20
   weight_decay: 1.0e-5
+
+hp_constraints:
+  d_model: {min: 64, max: 256}
+  n_heads: {max_ratio_to_d_model: 16}  # n_heads <= d_model // 16
 
 benchmark:
   ETTh1: 0.370

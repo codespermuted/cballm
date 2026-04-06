@@ -268,6 +268,60 @@ def get_hp_preset(capacity: str) -> dict:
     return presets.get(capacity, presets["minimal"])
 
 
+def compute_data_scale(n_rows: int, n_features: int, pred_len: int) -> dict:
+    """데이터 특성 기반 아키텍처 규모 자동 결정.
+
+    effective_size = n_rows * n_features / pred_len
+
+    Returns:
+        {"d_model": int, "n_layers": int, "n_heads": int, "scale": str}
+    """
+    # n_rows가 모델 규모의 주요 결정 요인, n_features/pred_len은 보정
+    effective = n_rows / max(pred_len, 1) * min(n_features, 20)
+
+    if effective < 200:
+        return {"d_model": 32, "n_layers": 1, "n_heads": 2, "scale": "tiny"}
+    elif effective < 2000:
+        return {"d_model": 64, "n_layers": 2, "n_heads": 4, "scale": "small"}
+    elif effective < 20000:
+        return {"d_model": 128, "n_layers": 3, "n_heads": 8, "scale": "medium"}
+    else:
+        return {"d_model": 256, "n_layers": 6, "n_heads": 8, "scale": "large"}
+
+
+def resolve_hp(recipe: dict, data_scale: dict) -> dict:
+    """HP 결정 우선순위 통합.
+
+    우선순위: constraints.min/max > recipe.recommended > data_scale > llm_answer
+    이 함수는 recipe 기본값과 data_scale을 병합하여 recommended + min/max를 반환.
+    Architect가 LLM 답변을 이 범위 안에서 clamp.
+
+    Returns:
+        {"d_model": {"recommended": int, "min": int, "max": int},
+         "n_layers": {"recommended": int, "min": int, "max": int},
+         "n_heads": {"recommended": int, "min": int, "max": int}}
+    """
+    constraints = recipe.get("hp_constraints", {})
+    recipe_d = recipe.get("d_model", 64)
+
+    # d_model: recipe 기본값과 data_scale 중 큰 쪽 사용
+    data_d = data_scale.get("d_model", 64)
+    recommended_d = max(recipe_d, data_d)
+    d_min = constraints.get("d_model", {}).get("min", 16)
+    d_max = constraints.get("d_model", {}).get("max", 256)
+    recommended_d = max(d_min, min(d_max, recommended_d))
+
+    # n_layers/n_heads: data_scale 기반, recipe에 명시 없으면 data_scale 사용
+    data_layers = data_scale.get("n_layers", 2)
+    data_heads = data_scale.get("n_heads", 4)
+
+    return {
+        "d_model": {"recommended": recommended_d, "min": d_min, "max": d_max},
+        "n_layers": {"recommended": data_layers, "min": 1, "max": 6},
+        "n_heads": {"recommended": data_heads, "min": 2, "max": 16},
+    }
+
+
 def get_block_capacity(block_name: str, catalog: dict | None = None) -> str:
     """블록의 capacity 반환."""
     if catalog is None:

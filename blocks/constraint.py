@@ -74,9 +74,70 @@ class SmoothnessConstraint(BaseConstraint):
         return smoothed
 
 
+class VolatilityGate(BaseConstraint):
+    """변동성 기반 gate — 고변동 구간의 예측을 감쇠/강화.
+
+    raw_input에서 rolling std를 변동성 proxy로 계산하고,
+    Sigmoid(Linear(vol))로 gate를 생성하여 예측에 곱함.
+
+    window: rolling std 윈도우 (기본 pred_len)
+    mode:
+      "dampen" — 고변동 구간 예측을 감쇠 (보수적)
+      "amplify" — 고변동 구간 예측을 강화
+    """
+
+    def __init__(self, d_model: int = 1, window: int = 24,
+                 mode: str = "dampen"):
+        super().__init__()
+        self.window = window
+        self.mode = mode
+        self.gate_fc = nn.Sequential(
+            nn.Linear(1, 16),
+            nn.GELU(),
+            nn.Linear(16, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, pred: torch.Tensor,
+                vol_feature: torch.Tensor | None = None) -> torch.Tensor:
+        """(B, H, output_dim) → (B, H, output_dim)
+
+        vol_feature가 없으면 pred 자체의 변동성으로 추정.
+        """
+        if vol_feature is not None:
+            # vol_feature: (B, H, 1) — 외부에서 전달된 변동성 지표
+            gate = self.gate_fc(vol_feature)
+        else:
+            # pred의 rolling 변동성을 proxy로
+            B, H, C = pred.shape
+            if H >= 3:
+                # 간이 rolling std (kernel=3)
+                k = min(3, H)
+                unfolded = pred.unfold(1, k, 1)  # (B, H-k+1, C, k)
+                vol = unfolded.std(dim=-1)  # (B, H-k+1, C)
+                # padding으로 길이 맞추기
+                pad_size = H - vol.shape[1]
+                vol = nn.functional.pad(vol.permute(0, 2, 1), (pad_size, 0), mode="reflect")
+                vol = vol.permute(0, 2, 1)  # (B, H, C)
+            else:
+                vol = torch.zeros_like(pred)
+
+            # 채널 평균 → 단일 변동성
+            vol_scalar = vol.mean(dim=-1, keepdim=True)  # (B, H, 1)
+            gate = self.gate_fc(vol_scalar)
+
+        if self.mode == "dampen":
+            # 고변동 → gate 높음 → (1-gate) 적용 → 감쇠
+            return pred * (1.0 - 0.5 * gate)
+        else:
+            # 고변동 → gate 높음 → 강화
+            return pred * (0.5 + gate)
+
+
 CONSTRAINT_REGISTRY: dict[str, type[BaseConstraint]] = {
     "Positivity": PositivityConstraint,
     "Clamp": ClampConstraint,
     "Monotonic": MonotonicConstraint,
     "Smoothness": SmoothnessConstraint,
+    "VolatilityGate": VolatilityGate,
 }

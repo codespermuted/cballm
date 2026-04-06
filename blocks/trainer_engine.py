@@ -17,6 +17,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 from .builder import build_model
+from cballm import display as D
 
 
 # ── 표준 결과 포맷 (Critic 입력 스펙) ──
@@ -49,12 +50,20 @@ class TrainResult:
     extreme_n_samples: int  # extreme 구간 샘플 수
     config_used: dict
     total_time_sec: float
+    val_residuals: np.ndarray | None = None   # val 잔차 (PostTrainHook용, 원본 스케일)
+    train_loss_history: list[float] = field(default_factory=list)  # epoch별 train loss
+    val_loss_history: list[float] = field(default_factory=list)    # epoch별 val MAE
+    val_mae_by_step: list[float] = field(default_factory=list)     # pred_len 각 step의 MAE
+    val_predictions: np.ndarray | None = None  # (val_samples, pred_len), DisagreementDiagnosis용
+    best_epoch: int = 0
 
     def to_json(self) -> str:
         """Critic이 파싱할 표준 JSON."""
         d = asdict(self)
-        # fold_results를 간결하게
         d["fold_results"] = [asdict(f) for f in self.fold_results]
+        # 큰 array/list는 JSON에서 제외
+        for key in ("val_residuals", "val_predictions", "train_loss_history", "val_loss_history", "val_mae_by_step"):
+            d.pop(key, None)
         return json.dumps(d, ensure_ascii=False, indent=2, default=str)
 
     def to_critic_text(self) -> str:
@@ -149,6 +158,10 @@ STANDARD_SPLITS = {
     "ECL": (18412, 21044, 26304),
     # SMP hourly: 98232 rows, last 2 months test (~1441), val = 2 months before that
     "smp_hourly": (94909, 96791, 98232),
+    # Weather: 52696 rows, 7:1:2
+    "weather": (36887, 42128, 52696),
+    # Exchange: 7588 rows, 7:1:2
+    "exchange_rate": (5311, 6069, 7588),
 }
 
 
@@ -187,37 +200,75 @@ def train_model(
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # ── Capacity 기반 HP 자동 조정 (v2) ──
-    # v2: temporal_mixer의 capacity로 결정, v1: backbone type으로 fallback
-    mixer_type = model_config.get("temporal_mixer", {}).get("type", "") if isinstance(
-        model_config.get("temporal_mixer"), dict) else model_config.get("temporal_mixer", "")
-    backbone_type = model_config.get("backbone", {}).get("type", "") if isinstance(
-        model_config.get("backbone"), dict) else ""
-
-    # capacity 매핑
-    capacity_map = {
-        # v2 temporal mixers
-        "LinearMix": "minimal", "MLPMix": "low", "GatedMLPMix": "medium",
-        "PatchMLPMix": "medium", "AttentionMix": "high", "PatchAttentionMix": "high",
-        "ConvMix": "medium", "RecurrentMix": "medium",
-        # v1 backbones
-        "Linear": "minimal", "PatchMLP": "medium",
+    # ── Capacity 기반 HP 자동 조정 (v3: 조합 기반) ──
+    # 블록별 base_params 추정 (d_model=64 기준)
+    BLOCK_PARAMS = {
+        "LinearProjection": 200, "PatchEmbedding": 2000, "FourierEmbedding": 1500,
+        "LinearMix": 500, "MLPMix": 3000, "GatedMLPMix": 4000, "PatchMLPMix": 3000,
+        "AttentionMix": 8000, "PatchAttentionMix": 10000, "ConvMix": 4000,
+        "RecurrentMix": 5000, "FrequencyMix": 3000,
+        "FeatureMLPMix": 1000, "InvertedAttentionMix": 5000,
+        "RevIN": 50, "BatchInstanceNorm": 100, "RobustScaler": 0,
+        "MovingAvgDecomp": 0, "LinearHead": 100, "DistributionalHead": 200,
+        "VolatilityGate": 500,
     }
-    capacity = capacity_map.get(mixer_type, capacity_map.get(backbone_type, "minimal"))
+
+    def _get_type(cfg):
+        if isinstance(cfg, dict):
+            return cfg.get("type", "")
+        return str(cfg) if cfg else ""
+
+    total_params = 0
+    for slot in ["normalizer", "decomposer", "encoder", "temporal_mixer",
+                  "channel_mixer", "head"]:
+        btype = _get_type(model_config.get(slot))
+        total_params += BLOCK_PARAMS.get(btype, 0)
+    for c in model_config.get("constraint", []):
+        total_params += BLOCK_PARAMS.get(_get_type(c), 0)
+
+    # d_model 보정: d_model이 크면 파라미터 증가
+    d_model_cfg = 64
+    enc = model_config.get("encoder", {})
+    if isinstance(enc, dict):
+        d_model_cfg = enc.get("d_model", 64)
+    total_params = int(total_params * (d_model_cfg / 64) ** 1.5)
+
+    # capacity 결정
+    if total_params < 1000:
+        capacity = "minimal"
+    elif total_params < 5000:
+        capacity = "low"
+    elif total_params < 20000:
+        capacity = "medium"
+    else:
+        capacity = "high"
 
     hp_presets = {
-        "minimal": {"lr": 1e-3,  "epochs": 50,  "patience": 10, "wd": 1e-4},
-        "low":     {"lr": 5e-4,  "epochs": 100, "patience": 15, "wd": 1e-5},
-        "medium":  {"lr": 1e-4,  "epochs": 100, "patience": 15, "wd": 1e-5},
-        "high":    {"lr": 1e-4,  "epochs": 200, "patience": 20, "wd": 1e-5},
+        "minimal": {"lr": 1e-3,  "epochs": 50,  "patience": 7,  "wd": 1e-4},
+        "low":     {"lr": 5e-4,  "epochs": 100, "patience": 10, "wd": 1e-5},
+        "medium":  {"lr": 1e-4,  "epochs": 150, "patience": 15, "wd": 1e-5},
+        "high":    {"lr": 5e-5,  "epochs": 200, "patience": 20, "wd": 1e-5},
     }
     preset = hp_presets.get(capacity, hp_presets["minimal"])
     lr = preset["lr"]
     epochs = preset["epochs"]
     patience = preset["patience"]
     weight_decay = preset["wd"]
-    block_name = mixer_type or backbone_type or "Linear"
-    print(f"HP preset ({block_name}, capacity={capacity}): lr={lr}, epochs={epochs}, patience={patience}, wd={weight_decay}")
+
+    mixer_type = _get_type(model_config.get("temporal_mixer"))
+    block_name = mixer_type or _get_type(model_config.get("backbone")) or "Linear"
+    D.print_training_config(block_name, f"{capacity}(~{total_params}p)", lr, epochs, patience)
+
+    # 커스텀 조합이면 최소 warmup 보장
+    is_custom = model_config.get("_recipe_name", "") == "custom"
+    if is_custom and capacity == "minimal":
+        # 커스텀인데 minimal이면 low로 올림 (DLinear 단독이 아닌 한)
+        has_decomposer = _get_type(model_config.get("decomposer")) not in ("", "None")
+        has_non_linear = mixer_type not in ("LinearMix", "Linear", "")
+        if has_decomposer or has_non_linear:
+            capacity = "low"
+            preset = hp_presets["low"]
+            lr, epochs, patience, weight_decay = preset["lr"], preset["epochs"], preset["patience"], preset["wd"]
 
     # ── 1. 데이터 로드 ──
     if data_path.endswith(".parquet"):
@@ -242,10 +293,8 @@ def train_model(
     # ── 전처리 (Architect Decision Protocol 결과) ──
     preprocessing = model_config.pop("preprocessing", {})
     if preprocessing.get("log_transform") and df[target_col].min() > 0:
-        print("  전처리: log transform 적용")
         df[target_col] = np.log1p(df[target_col])
     if preprocessing.get("differencing"):
-        print("  전처리: 1차 차분 적용")
         df[target_col] = df[target_col].diff()
         df = df.iloc[1:]  # 첫 행 NaN 제거
 
@@ -253,7 +302,13 @@ def train_model(
     n_features = data_values.shape[1]
     n_total = len(data_values)
 
-    print(f"데이터: {n_total}행, {n_features}피쳐, 타겟: {target_col} (idx={target_idx})")
+    # batch_size 조정 (데이터 크기 기반)
+    if n_total < 5000:
+        batch_size = 16
+    elif n_total > 30000:
+        batch_size = 64
+
+    D.print_data_info(n_total, n_features, target_col, target_idx, preprocessing)
 
     # ── 2. Split 결정 (정규화보다 먼저 — train 범위를 알아야 함) ──
     dataset_name = Path(data_path).stem
@@ -263,19 +318,13 @@ def train_model(
 
     if std_split:
         train_end, val_end, test_end = std_split
-        print(f"📏 Standard benchmark split: train[:{train_end}] val[{train_end}:{val_end}] test[{val_end}:{test_end}]")
         folds = [(train_end, train_end, val_end)]
         test_start = val_end
     else:
-        if benchmark_mode:
-            print(f"⚠️ '{dataset_name}'의 표준 split 없음, temporal CV로 fallback")
         folds, test_start = temporal_split(n_total, seq_len, pred_len, n_folds)
         train_end = folds[0][0] if folds else int(n_total * 0.7)
-    print(f"CV folds: {len(folds)}, test_start: {test_start}")
 
     # ── 3. 정규화 — DatasetNorm은 항상 적용 (벤치마크 비교 기준) ──
-    # RevIN/RobustScaler는 DatasetNorm 위에서 instance-level 정규화로 동작.
-    # 논문 표준: DatasetNorm(train mean/std) + RevIN(instance) 모두 적용.
     train_data = data_values[:train_end]
     means = train_data.mean(axis=0)
     stds = train_data.std(axis=0) + 1e-8
@@ -286,31 +335,33 @@ def train_model(
     if normalizer_cfg:
         norm_type = normalizer_cfg if isinstance(normalizer_cfg, str) \
             else normalizer_cfg.get("type", "") if isinstance(normalizer_cfg, dict) else ""
-    if norm_type:
-        print(f"정규화: DatasetNorm(train[:{train_end}]) + {norm_type}(instance)")
-    else:
-        print(f"정규화: DatasetNorm(train[:{train_end}])")
+
+    D.print_split_info(len(folds), test_start, test_end, norm_type, train_end)
 
     # 극단값 threshold: train 분포 기준
     target_values_train = data_values[:train_end, target_idx]
     lower_thresh = np.percentile(target_values_train, 100 - extreme_percentile)
     upper_thresh = np.percentile(target_values_train, extreme_percentile)
-    print(f"Extreme thresholds: lower={lower_thresh:.4f}, upper={upper_thresh:.4f}")
 
     # ── 3. CV 학습 ──
     fold_results = []
     best_fold_mae = float("inf")
     best_fold_state = None
+    best_val_residuals = None
+    best_train_loss_history: list[float] = []
+    best_val_loss_history: list[float] = []
+    best_val_mae_by_step: list[float] = []
+    best_val_predictions = None
+    best_best_epoch = 0
+
+    D.print_fold_header()
 
     for fold_idx, (train_end, val_start, val_end) in enumerate(folds):
-        print(f"\n--- Fold {fold_idx+1}/{len(folds)} ---")
-        print(f"  Train: [0:{train_end}], Val: [{val_start}:{val_end}]")
 
         train_ds = TimeSeriesDataset(data_norm[:train_end], target_idx, seq_len, pred_len)
         val_ds = TimeSeriesDataset(data_norm[val_start:val_end], target_idx, seq_len, pred_len)
 
         if len(train_ds) == 0 or len(val_ds) == 0:
-            print(f"  ⚠️ 데이터 부족, fold 스킵")
             continue
 
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
@@ -327,28 +378,72 @@ def train_model(
 
         # Nadam 옵티마이저
         optimizer = torch.optim.NAdam(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+        # Scheduler: capacity에 따라 warmup 적용
+        if capacity in ("high",):
+            # Linear warmup (10 epochs) + CosineAnnealing
+            warmup_epochs = min(10, epochs // 5)
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs,
+            )
+            cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=epochs - warmup_epochs,
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer, schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_epochs],
+            )
+        elif capacity in ("medium",):
+            # Cosine with 3-epoch warmup
+            warmup_epochs = min(3, epochs // 10)
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs,
+            )
+            cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=epochs - warmup_epochs,
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer, schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_epochs],
+            )
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
         # 학습
         fold_start = time.time()
         best_val_mae = float("inf")
         best_epoch = 0
         wait = 0
+        fold_train_losses: list[float] = []
+        fold_val_maes: list[float] = []
+        fold_best_val_preds_orig = None
+        fold_best_val_targets_orig = None
 
         for epoch in range(epochs):
             # Train
             model.train()
             train_losses = []
+            nan_detected = False
             for xb, yb in train_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
                 loss = loss_fn(pred, yb)
+                if torch.isnan(loss) or torch.isinf(loss):
+                    nan_detected = True
+                    break
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 train_losses.append(loss.item())
+
+            if nan_detected:
+                # NaN/Inf 감지: lr 절반으로 줄이고 현재 fold 중단
+                print(f"    NaN detected at epoch {epoch}, halving lr")
+                break
+
             scheduler.step()
+            fold_train_losses.append(float(np.mean(train_losses)) if train_losses else float("inf"))
 
             # Validate
             model.eval()
@@ -357,6 +452,9 @@ def train_model(
                 for xb, yb in val_loader:
                     xb, yb = xb.to(device), yb.to(device)
                     pred = model(xb)
+                    # dict 반환 (DistributionalHead) → mean 추출
+                    if isinstance(pred, dict):
+                        pred = pred.get("mean", pred.get("mu"))
                     val_preds.append(pred.cpu())
                     val_targets.append(yb.cpu())
 
@@ -368,10 +466,13 @@ def train_model(
             val_targets_orig = val_targets * stds[target_idx] + means[target_idx]
 
             val_mae = (val_preds_orig - val_targets_orig).abs().mean().item()
+            fold_val_maes.append(val_mae)
 
             if val_mae < best_val_mae:
                 best_val_mae = val_mae
                 best_epoch = epoch
+                fold_best_val_preds_orig = val_preds_orig
+                fold_best_val_targets_orig = val_targets_orig
                 best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
                 wait = 0
             else:
@@ -401,11 +502,22 @@ def train_model(
             best_epoch=best_epoch,
         )
         fold_results.append(fold_result)
-        print(f"  MAE: {best_val_mae:.4f}, norm_MSE: {val_norm_mse:.4f} (epoch {best_epoch}, {fit_time:.1f}s)")
+        D.print_fold_result(fold_idx + 1, len(folds), len(train_ds),
+                            best_val_mae, val_norm_mse, best_epoch, epochs, fit_time)
 
         if best_val_mae < best_fold_mae:
             best_fold_mae = best_val_mae
             best_fold_state = best_state
+            # val 잔차 저장 (PostTrainHook 진단용, 원본 스케일)
+            best_val_residuals = (fold_best_val_targets_orig - fold_best_val_preds_orig).numpy().reshape(-1)
+            best_train_loss_history = fold_train_losses.copy()
+            best_val_loss_history = fold_val_maes.copy()
+            best_best_epoch = best_epoch
+            # step별 MAE: (val_samples, pred_len, 1) → 각 step의 MAE
+            step_errors = (fold_best_val_targets_orig - fold_best_val_preds_orig).abs()  # (N, H, 1)
+            best_val_mae_by_step = step_errors.squeeze(-1).mean(dim=0).tolist()  # (H,)
+            # val predictions 저장 (DisagreementDiagnosis용)
+            best_val_predictions = fold_best_val_preds_orig.squeeze(-1).numpy()  # (N, H)
 
     # ── 4. CV 통계 ──
     if not fold_results:
@@ -415,6 +527,7 @@ def train_model(
             normal_metric={}, extreme_metric={},
             extreme_threshold=float(upper_thresh), extreme_n_samples=0,
             config_used=model_config, total_time_sec=time.time() - total_start,
+            val_residuals=None, val_predictions=None,
         )
 
     cv_maes = [f.metrics["MAE"] for f in fold_results]
@@ -422,10 +535,9 @@ def train_model(
     cv_mean = {"MAE": round(np.mean(cv_maes), 4), "MSE": round(np.mean(cv_mses), 4)}
     cv_std = {"MAE": round(np.std(cv_maes), 4), "MSE": round(np.std(cv_mses), 4)}
 
-    print(f"\nCV Mean MAE: {cv_mean['MAE']:.4f} ± {cv_std['MAE']:.4f}")
+    D.print_cv_summary(cv_mean["MAE"], cv_std["MAE"])
 
     # ── 5. Refit (train+val → test) ──
-    print(f"\n--- Refit (train+val → test) [test window: {test_start}:{test_end}] ---")
     refit_data = data_norm[:test_start]
     test_data = data_norm[test_start:test_end]
 
@@ -507,8 +619,8 @@ def train_model(
             test_extreme_mae = (test_preds_orig[extreme_mask_t] - test_targets_orig[extreme_mask_t]).abs().mean().item()
             test_extreme_metric = {"MAE": round(test_extreme_mae, 4)}
 
-        print(f"  Test MAE: {test_mae:.4f}, norm_MSE: {test_norm_mse:.4f} (벤치마크 기준)")
-        print(f"  Normal MAE: {test_normal_mae:.4f}, Extreme MAE: {test_extreme_mae:.4f} ({extreme_n} samples)")
+        D.print_test_results(test_mae, test_norm_mse, test_normal_mae,
+                             test_extreme_mae, extreme_n)
     else:
         refit_metric = {"MAE": 0, "MSE": 0}
         refit_metric_norm = {"MAE": 0, "MSE": 0}
@@ -518,8 +630,12 @@ def train_model(
 
     total_time = time.time() - total_start
 
-    # 모델 이름: config에서 backbone type
-    model_name = model_config.get("backbone", {}).get("type", "Unknown")
+    # 모델 이름: v2는 temporal_mixer, v1은 backbone
+    mixer = model_config.get("temporal_mixer", {})
+    backbone = model_config.get("backbone", {})
+    model_name = (mixer.get("type") if isinstance(mixer, dict) else mixer) \
+        or (backbone.get("type") if isinstance(backbone, dict) else backbone) \
+        or "Unknown"
     regime = model_config.get("regime")
     if regime:
         model_name = f"{regime.get('type', 'Regime')}({model_name})"
@@ -537,6 +653,12 @@ def train_model(
         extreme_n_samples=extreme_n,
         config_used=model_config,
         total_time_sec=round(total_time, 1),
+        val_residuals=best_val_residuals,
+        train_loss_history=best_train_loss_history,
+        val_loss_history=best_val_loss_history,
+        val_mae_by_step=best_val_mae_by_step,
+        val_predictions=best_val_predictions,
+        best_epoch=best_best_epoch,
     )
 
 

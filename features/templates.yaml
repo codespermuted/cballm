@@ -1,13 +1,14 @@
-# Feature Engineering Templates
-# Engineer가 사용하는 rule-based 피쳐 생성 템플릿. 모든 템플릿에 leakage 방지 규칙 내장.
+# Feature Engineering Templates (보강판)
+# Engineer가 사용하는 rule-based 피쳐 생성 템플릿.
+# v2.1: difference, frequency domain, volatility feature 추가. 모든 템플릿에 leakage 방지 규칙 내장.
 
 calendar_features:
   type: known_covariate
   when: "datetime 컬럼 존재"
   features:
-    - "hour_sin = sin(2π·hour/24), hour_cos = cos(2π·hour/24)"
-    - "dow_sin = sin(2π·dayofweek/7), dow_cos = cos(2π·dayofweek/7)"
-    - "month_sin = sin(2π·month/12), month_cos = cos(2π·month/12)"
+    - "hour_sin = sin(2pi*hour/24), hour_cos = cos(2pi*hour/24)"
+    - "dow_sin = sin(2pi*dayofweek/7), dow_cos = cos(2pi*dayofweek/7)"
+    - "month_sin = sin(2pi*month/12), month_cos = cos(2pi*month/12)"
     - "is_weekend = (dayofweek >= 5)"
   shift_required: false
   leakage_safe: true
@@ -24,8 +25,8 @@ lag_features:
   shift_required: true
   leakage_safe: "k >= pred_len일 때만"
   common_patterns:
-    hourly_data: "pred_len=96 → lag_96, lag_168, lag_336"
-    daily_data: "pred_len=7 → lag_7, lag_14, lag_30"
+    hourly_data: "pred_len=96 -> lag_96, lag_168, lag_336"
+    daily_data: "pred_len=7 -> lag_7, lag_14, lag_30"
 
 rolling_features:
   type: unknown_covariate
@@ -39,14 +40,76 @@ rolling_features:
   shift_required: true
   leakage_safe: "shift(pred_len) 적용 시에만"
 
+difference_features:
+  type: unknown_covariate
+  when: "is_stationary == false 또는 강한 추세 존재"
+  selection_rule: |
+    1. 1차 차분: target의 변화량 (추세 제거)
+    2. 계절 차분: dominant_period 기반 (계절성 제거)
+    3. 모든 차분에 .shift(pred_len) 적용 (LEAK-003)
+  features:
+    - "diff_1 = target.diff(1).shift(pred_len)"
+    - "seasonal_diff_{p} = target.diff(dominant_period).shift(pred_len)"
+  shift_required: true
+  leakage_safe: "shift(pred_len) 적용 시에만"
+  conditions:
+    diff_1:
+      when: "is_stationary == false"
+      reason: "비정상 시계열의 추세를 feature로 제공"
+    seasonal_diff:
+      when: "dominant_period is not None and max_acf > 0.5"
+      reason: "계절 패턴의 변화를 캡처"
+
+volatility_features:
+  type: unknown_covariate
+  when: "target_std / target_mean > 0.3 (변동계수 높음) 또는 regime_stable == false"
+  selection_rule: |
+    1. rolling std를 rolling mean으로 나눈 변동계수
+    2. 모든 계산에 .shift(pred_len) 적용 (LEAK-003)
+  features:
+    - "rolling_cv_{w} = (target.rolling(w).std() / target.rolling(w).mean().abs().clip(1e-8)).shift(pred_len)"
+    - "ewm_std_{span} = target.ewm(span=span).std().shift(pred_len)"
+  shift_required: true
+  leakage_safe: "shift(pred_len) 적용 시에만"
+  param_hints:
+    window: "dominant_period 또는 24 (hourly)"
+    span: "dominant_period * 2"
+
+frequency_features:
+  type: unknown_covariate
+  when: "has_strong_seasonality == true 또는 multi_scale_suspected == true"
+  selection_rule: |
+    1. 과거 window의 FFT magnitude를 feature로 사용
+    2. window = seq_len, .shift(pred_len) 적용 (LEAK-003)
+    3. 상위 k개 주파수 성분의 magnitude만 추출 (k = n_harmonics)
+  features:
+    - "fft_mag_top_{k} = top-k FFT magnitudes of target.rolling(seq_len).apply(fft).shift(pred_len)"
+  shift_required: true
+  leakage_safe: "shift(pred_len) 적용 + 과거 window만 사용"
+  implementation_note: |
+    # 구현 예시 (Engineer가 코드 생성 시 참고)
+    import numpy as np
+    def fft_features(series, window, pred_len, k=3):
+        magnitudes = []
+        for col_idx in range(k):
+            feat = series.rolling(window).apply(
+                lambda x: np.sort(np.abs(np.fft.rfft(x))[1:])[-col_idx-1]
+                if len(x) == window else np.nan
+            ).shift(pred_len)
+            magnitudes.append(feat)
+        return magnitudes
+  conditions:
+    when_useful: "주기성이 시간에 따라 변하는 데이터 (예: 전력, 교통)"
+    when_not_useful: "정상적이고 단일 주기인 데이터"
+
 exogenous_features:
-  type: "판단 필요 — known인지 unknown인지 구분 필수"
+  type: "판단 필요 -- known인지 unknown인지 구분 필수"
   when: "외생변수 존재"
   classification_rule: |
     Q: "예측 시점 t에서 이 변수의 t+1 ~ t+pred_len 값을 알 수 있는가?"
-      YES → known_covariate: shift 불필요
-      NO  → unknown_covariate: shift(pred_len) 필수
-      불확실 → unknown으로 취급 (안전 우선)
+      YES -> known_covariate: shift 불필요
+      NO  -> unknown_covariate: shift(pred_len) 필수
+      불확실 -> unknown으로 취급 (안전 우선)
   selection_rule: "Scout의 exog_correlations에서 |r| >= 0.3인 변수 우선"
 
 leakage_verification:
@@ -55,3 +118,7 @@ leakage_verification:
     auto_remove: 0.98
     warn_only: 0.95
     safe: 0.95
+  additional_checks:
+    - "shift가 pred_len 미만인 feature가 없는지 확인"
+    - "known_covariate로 분류된 변수가 실제로 미래값을 알 수 있는지 확인"
+    - "rolling window가 shift 이전에 계산되었는지 확인 (순서 중요)"

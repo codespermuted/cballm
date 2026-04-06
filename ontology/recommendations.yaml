@@ -1,45 +1,384 @@
-# CBALLM v2 Recommendation Rules
+# CBALLM v2 Recommendation Rules (보강판)
 # KG Matcher가 후보 생성에 사용하는 soft 규칙
+# v2.1: 단일 조건 → 복합 조건, 신뢰도 점수, 상충 처리 추가
 
 encoder_recommendations:
-  - condition: "max_acf_at_known_periods > 0.7"
+  - id: ENC-01
+    condition:
+      all:
+        - "max_acf_at_known_periods > 0.7"
+        - "n_rows >= 1000"
     recommends: FourierEmbedding
-    param_hint: "n_harmonics = count(ACF > 0.7)"
+    param_hint: "n_harmonics = count(ACF > 0.7), 단 max 5"
+    confidence: high
+    reason: "강한 주기성 + 충분한 데이터 → Fourier basis가 효과적"
 
-  - condition: "seq_len >= 96 AND multi_scale_suspected"
+  - id: ENC-02
+    condition:
+      all:
+        - "max_acf_at_known_periods > 0.4"
+        - "max_acf_at_known_periods <= 0.7"
+        - "n_rows >= 2000"
+    recommends: FourierEmbedding
+    param_hint: "n_harmonics = 1 (보수적)"
+    confidence: medium
+    reason: "중간 주기성 — Fourier 시도 가능하나 LinearProjection과 비교 필요"
+
+  - id: ENC-03
+    condition:
+      all:
+        - "seq_len >= 96"
+        - "n_rows >= 5000"
+        - "has_local_patterns == true or complex_temporal_pattern == true"
     recommends: PatchEmbedding
-    param_hint: "patch_len = dominant_period // 4"
+    param_hint: "patch_len = dominant_period // 4, stride = patch_len // 2"
+    confidence: high
+    reason: "긴 시퀀스 + 복잡한 패턴 → Patch가 local+global 모두 포착"
+
+  - id: ENC-04
+    condition:
+      all:
+        - "seq_len >= 96"
+        - "n_rows >= 10000"
+      any:
+        - "n_distinct_periods >= 2"
+        - "regime_stable == false"
+    recommends: PatchEmbedding
+    param_hint: "patch_len = 16, stride = 8 (범용)"
+    confidence: medium
+    reason: "다중 주기 또는 regime 변화 → Patch가 multi-scale 패턴 포착"
+
+  - id: ENC-DEFAULT
+    condition: "always"
+    recommends: LinearProjection
+    param_hint: "d_model: C<=7이면 32, C<=20이면 64, C>20이면 128"
+    confidence: baseline
+    reason: "기본값. 확신 없으면 이것."
 
 temporal_mixer_recommendations:
-  - condition: "always"
+  - id: TM-01
+    condition: "always"
     recommends: LinearMix
     priority: baseline_first
+    confidence: baseline
+    reason: "DLinear 원칙 — 반드시 baseline 확보 후 복잡한 모델"
 
-  - condition: "n_rows >= 10000 AND complex_temporal_pattern"
-    recommends: PatchAttentionMix
+  - id: TM-02
+    condition:
+      all:
+        - "n_rows >= 2000"
+        - "n_rows < 10000"
+      any:
+        - "is_stationary == false"
+        - "max_acf_at_known_periods > 0.5"
+    recommends: MLPMix
+    param_hint: "hidden_dim=256, n_layers=1"
+    confidence: medium
+    reason: "중간 규모 데이터 + 비정상/주기성 → MLP가 비선형 패턴 학습"
+
+  - id: TM-03
+    condition:
+      all:
+        - "n_rows >= 10000"
+        - "complex_temporal_pattern == true"
     requires: PatchEmbedding
+    recommends: PatchAttentionMix
+    param_hint: "n_layers=3, n_heads=4"
+    confidence: high
+    reason: "대규모 + 복잡 패턴 → PatchTST 핵심 조합"
 
-  - condition: "has_local_patterns (spike, change_point)"
+  - id: TM-04
+    condition:
+      all:
+        - "has_local_patterns == true"
+        - "n_rows >= 3000"
     recommends: ConvMix
+    param_hint: "kernel_size=7, dilation=exponential"
+    confidence: medium
+    reason: "spike/change point 등 local 패턴 → Conv의 locality bias 유리"
+
+  - id: TM-05
+    condition:
+      all:
+        - "n_rows >= 5000"
+        - "n_features > 10"
+    recommends: GatedMLPMix
+    param_hint: "hidden_dim=256"
+    confidence: medium
+    reason: "feature 많으면 gating으로 noisy feature 억제"
+
+  - id: TM-06
+    condition:
+      all:
+        - "n_rows >= 2000"
+        - "n_rows < 5000"
+        - "seq_len <= 200"
+    recommends: RecurrentMix
+    param_hint: "cell_type=GRU, hidden_dim=128"
+    confidence: low
+    reason: "소규모 + 짧은 시퀀스 → RNN 시도 가능 (baseline 이후)"
 
 channel_mixer_recommendations:
-  - condition: "high_cross_corr_pairs >= 5 AND n_features > 10"
+  - id: CM-01
+    condition:
+      all:
+        - "high_cross_corr_pairs >= 5"
+        - "n_features > 10"
+        - "n_rows >= 10000"
     recommends: InvertedAttentionMix
+    param_hint: "n_heads=4, n_layers=2"
+    confidence: high
+    reason: "많은 변수 + 강한 상관 + 대규모 → iTransformer 방식이 SOTA"
 
-  - condition: "high_cross_corr_pairs >= 3 AND n_features <= 10"
+  - id: CM-02
+    condition:
+      all:
+        - "high_cross_corr_pairs >= 3"
+        - "n_features <= 10"
     recommends: FeatureMLPMix
+    param_hint: "hidden_dim=64"
+    confidence: medium
+    reason: "적당한 변수 수 + 상관 존재 → 가벼운 MLP mixing"
+
+  - id: CM-03
+    condition:
+      any:
+        - "high_cross_corr_pairs < 3"
+        - "n_features <= 3"
+    recommends: null
+    confidence: high
+    reason: "변수 간 상관 약하거나 변수 적음 → channel mixing 불필요"
 
 loss_recommendations:
-  - condition: "extreme_ratio > 2.0"
+  - id: LOSS-01
+    condition:
+      all:
+        - "extreme_ratio > 2.0"
+        - "target_skew <= 1.5"
     recommends: AsymmetricLoss
     param_hint: "under_weight = min(extreme_ratio, 5.0)"
+    confidence: high
+    reason: "극단값 비율 높고 skew 낮음 → 비대칭 가중치로 극단 커버"
 
-  - condition: "target_skew > 1.5"
+  - id: LOSS-02
+    condition:
+      all:
+        - "target_skew > 1.5"
+        - "extreme_ratio <= 2.0"
     recommends: Huber
+    param_hint: "delta=1.0"
+    confidence: medium
+    reason: "skew 높고 극단 보통 → Huber가 큰 오차에 강건"
+
+  - id: LOSS-03
+    condition:
+      all:
+        - "extreme_ratio > 2.0"
+        - "target_skew > 1.5"
+    recommends: AsymmetricLoss
+    param_hint: "under_weight = min(extreme_ratio, 5.0)"
+    confidence: high
+    reason: "극단 + skew 모두 높음 → Asymmetric 우선 (극단이 더 중요)"
+
+  - id: LOSS-DEFAULT
+    condition: "always"
+    recommends: MAE
+    confidence: baseline
+    reason: "기본값. 이상치에 강건."
 
 constraint_recommendations:
-  - condition: "can_be_negative == false AND target_min >= 0"
+  - id: CON-01
+    condition:
+      all:
+        - "can_be_negative == false"
+        - "target_min >= 0"
     recommends: Positivity
+    confidence: high
+    reason: "물리적으로 음수 불가 → Softplus 적용"
+
+  - id: CON-02
+    condition:
+      all:
+        - "known_physical_bounds == true"
+    recommends: Clamp
+    confidence: high
+    reason: "알려진 물리 한계 → hard clamp"
+
+normalizer_recommendations:
+  - id: NORM-01
+    condition:
+      all:
+        - "is_stationary == false"
+        - "outlier_ratio <= 0.05"
+    recommends: RevIN
+    confidence: high
+    reason: "비정상 + 이상치 적음 → RevIN이 표준"
+
+  - id: NORM-02
+    condition:
+      all:
+        - "outlier_ratio > 0.05"
+    recommends: RobustScaler
+    confidence: high
+    reason: "이상치 많음 → IQR 기반이 안전"
+
+  - id: NORM-03
+    condition:
+      all:
+        - "is_stationary == true"
+        - "outlier_ratio <= 0.05"
+    recommends: null
+    confidence: medium
+    reason: "정상 + 이상치 적음 → DatasetNorm만으로 충분"
+
+# ──────────────────────────────────────────────
+# v2.1 신규 블록 추천 규칙
+# ──────────────────────────────────────────────
+
+decomposition_recommendations:
+  - id: DECOMP-01
+    condition:
+      all:
+        - "has_strong_seasonality == true"
+        - "is_stationary == false"
+    recommends: MovingAvgDecomp
+    param_hint: "kernel_size = dominant_period (홀수 강제)"
+    confidence: high
+    reason: "강한 주기성 + 비정상 → trend/seasonal 분리가 효과적 (DLinear 핵심)"
+
+  - id: DECOMP-02
+    condition:
+      all:
+        - "is_stationary == false"
+        - "max_acf_at_known_periods <= 0.5"
+    recommends: MovingAvgDecomp
+    param_hint: "kernel_size = 25 (기본)"
+    confidence: medium
+    reason: "비정상이지만 주기성 약함 → trend 분리만으로도 도움"
+
+volatility_recommendations:
+  - id: VOL-01
+    condition:
+      all:
+        - "segment_variance_ratio > 3.0"
+    recommends: VolatilityGate
+    param_hint: "window = pred_len, mode = dampen"
+    confidence: high
+    reason: "구간별 분산 차이 큼 → 고변동 구간 예측 감쇠"
+
+  - id: VOL-02
+    condition:
+      all:
+        - "regime_stable == false"
+        - "n_regime_changes >= 3"
+    recommends: VolatilityGate
+    param_hint: "window = dominant_period // 2"
+    confidence: medium
+    reason: "regime 변화 잦음 → 변동성 gate로 적응"
+
+frequency_mixer_recommendations:
+  - id: FREQ-01
+    condition:
+      all:
+        - "has_strong_seasonality == true"
+        - "n_distinct_periods >= 2"
+        - "n_rows >= 3000"
+    recommends: FrequencyMix
+    param_hint: "top_k = n_distinct_periods + 2"
+    confidence: high
+    reason: "다중 주기 + 충분한 데이터 → frequency domain mixing 효과적"
+
+  - id: FREQ-02
+    condition:
+      all:
+        - "max_acf_at_known_periods > 0.7"
+        - "n_rows >= 5000"
+    recommends: FrequencyMix
+    param_hint: "top_k = 5"
+    confidence: medium
+    reason: "강한 주기성 + 대규모 → FourierEmbedding 대비 mixing 능력 추가"
+
+distributional_recommendations:
+  # === DistributionalHead 사용 여부 ===
+  - id: DIST-01
+    condition:
+      all:
+        - "requires_uncertainty == true"
+    recommends: DistributionalHead
+    param_hint: "distribution은 아래 규칙으로 결정"
+    confidence: high
+    reason: "불확실성 추정 요구 → DistributionalHead 필수"
+
+  - id: DIST-02
+    condition:
+      all:
+        - "extreme_ratio > 3.0"
+        - "target_skew > 2.0"
+    recommends: DistributionalHead
+    param_hint: "point_forecast = true"
+    confidence: medium
+    reason: "극단값 많고 비대칭 → 분포 기반 접근이 유리"
+
+# === 분포 선택 규칙 (KG Matcher → Architect Q8에 후보 전달) ===
+distribution_selection:
+  - id: DIST-GAUSSIAN
+    condition:
+      all:
+        - "jarque_bera_pvalue > 0.05"
+    recommends: gaussian
+    loss: GaussianNLL
+    confidence: high
+    reason: "정규성 기각 못함 → gaussian 적합"
+    is_default: true
+
+  - id: DIST-STUDENT-T
+    condition:
+      all:
+        - "target_kurtosis > 5"
+        - "tail_index > 0.02"
+    recommends: student_t
+    loss: StudentTNLL
+    confidence: high
+    reason: "heavy tail (kurtosis > 5, 극단값 2%+) → Student-t가 tail 커버"
+
+  - id: DIST-LOGNORMAL
+    condition:
+      all:
+        - "target_can_be_negative == false"
+        - "target_skew > 0.5"
+    recommends: log_normal
+    loss: LogNormalNLL
+    confidence: medium
+    reason: "양수 제약 + right skew → Log-Normal 적합"
+
+  - id: DIST-MIXTURE
+    condition:
+      all:
+        - "n_regime_changes >= 2"
+        - "segment_variance_ratio > 3.0"
+    recommends: mixture_gaussian
+    loss: MixtureGaussianNLL
+    param_hint: "n_components = min(n_regime_changes + 1, 5)"
+    confidence: medium
+    reason: "다중 regime + 분산 차이 큼 → multi-modal 분포"
+
+  - id: DIST-DEFAULT
+    condition: "always"
+    recommends: gaussian
+    loss: GaussianNLL
+    confidence: baseline
+    reason: "기본값. 확신 없으면 gaussian."
+
+bin_recommendations:
+  - id: BIN-01
+    condition:
+      all:
+        - "batch_size >= 16"
+        - "is_stationary == false"
+    recommends: BatchInstanceNorm
+    param_hint: ""
+    confidence: medium
+    reason: "RevIN 대안. 배치 간 분포가 유사하면 BN 성분이 유리."
 
 forecasting_setting_auto_detect:
   - if: "변수가 1개"
