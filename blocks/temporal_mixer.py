@@ -265,6 +265,83 @@ class FrequencyMix(BaseTemporalMixer):
         return x_out.permute(0, 2, 1)       # (B, H, d_model)
 
 
+class MambaMix(BaseTemporalMixer):
+    """S6 SSM (Mamba simplified) — 선택적 상태 공간 모델.
+
+    input-dependent A, B, C로 시퀀스를 처리.
+    O(T) 복잡도 — AttentionMix의 O(T²) 대비 효율적.
+    long-range dependency + local selectivity.
+    """
+
+    def __init__(self, seq_len: int, pred_len: int, d_model: int,
+                 state_dim: int = 16, n_layers: int = 2,
+                 dropout: float = 0.1, **kwargs):
+        super().__init__()
+        self.n_layers = n_layers
+        self.d_model = d_model
+        self.state_dim = state_dim
+
+        # S6 layers
+        self.proj_ins = nn.ModuleList()
+        self.dt_projs = nn.ModuleList()
+        self.A_logs = nn.ParameterList()
+        self.Ds = nn.ParameterList()
+        self.B_projs = nn.ModuleList()
+        self.C_projs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        self.drops = nn.ModuleList()
+        for _ in range(n_layers):
+            self.proj_ins.append(nn.Linear(d_model, d_model * 2))
+            self.dt_projs.append(nn.Linear(d_model, d_model))
+            self.A_logs.append(nn.Parameter(torch.log(torch.randn(d_model, state_dim).abs() + 1e-4)))
+            self.Ds.append(nn.Parameter(torch.ones(d_model)))
+            self.B_projs.append(nn.Linear(d_model, state_dim))
+            self.C_projs.append(nn.Linear(d_model, state_dim))
+            self.norms.append(nn.LayerNorm(d_model))
+            self.drops.append(nn.Dropout(dropout))
+
+        self.temporal_proj = nn.Linear(seq_len, pred_len)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, d_model)
+        for i in range(self.n_layers):
+            residual = x
+            x = self.norms[i](x)
+
+            # S6 scan
+            xz = self.proj_ins[i](x)
+            x_in, z = xz.chunk(2, dim=-1)
+
+            # input-dependent parameters
+            dt = nn.functional.softplus(self.dt_projs[i](x_in))  # (B, T, d_model)
+            B = self.B_projs[i](x_in)                     # (B, T, state_dim)
+            C = self.C_projs[i](x_in)                     # (B, T, state_dim)
+            A = -torch.exp(self.A_logs[i].float())         # (d_model, state_dim)
+
+            # discretize + scan (simplified sequential)
+            Bt, T, D = x_in.shape
+            h = torch.zeros(Bt, D, self.state_dim, device=x.device)
+            ys = []
+            for t in range(T):
+                # h = A_bar * h + B_bar * x
+                dt_t = dt[:, t, :].unsqueeze(-1)           # (B, D, 1)
+                A_bar = torch.exp(A.unsqueeze(0) * dt_t)   # (B, D, N)
+                B_bar = dt_t * B[:, t, :].unsqueeze(1)     # (B, D, N) via broadcast
+                h = A_bar * h + B_bar * x_in[:, t, :].unsqueeze(-1)
+                y_t = (h * C[:, t, :].unsqueeze(1)).sum(-1) # (B, D)
+                ys.append(y_t)
+
+            y = torch.stack(ys, dim=1)  # (B, T, D)
+            y = y * torch.sigmoid(z)    # gating
+            y = y + x_in * self.Ds[i]   # skip
+            x = self.drops[i](y) + residual
+
+        # T → H
+        x = x.permute(0, 2, 1)
+        x = self.temporal_proj(x)
+        return x.permute(0, 2, 1)
+
+
 TEMPORAL_MIXER_REGISTRY: dict[str, type[BaseTemporalMixer]] = {
     "LinearMix": LinearMix,
     "MLPMix": MLPMix,
@@ -275,6 +352,7 @@ TEMPORAL_MIXER_REGISTRY: dict[str, type[BaseTemporalMixer]] = {
     "ConvMix": ConvMix,
     "RecurrentMix": RecurrentMix,
     "FrequencyMix": FrequencyMix,
+    "MambaMix": MambaMix,
     # v1 호환
     "Linear": LinearMix,
     "PatchMLP": PatchMLPMix,

@@ -253,7 +253,8 @@ class CandidateGenerator:
     UPGRADE_MAP = {
         "LinearMix": "MLPMix",
         "MLPMix": "ConvMix",
-        "ConvMix": "AttentionMix",
+        "ConvMix": "MambaMix",
+        "MambaMix": "AttentionMix",
     }
 
     @staticmethod

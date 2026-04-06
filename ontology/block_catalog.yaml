@@ -219,6 +219,21 @@ temporal_mixer:
       - "n_rows >= 3000"
     avoid_when: "global dependency만 중요한 smooth 시계열"
 
+  MambaMix:
+    source: "Mamba (Gu & Dao, 2023) simplified S6"
+    category: recurrence
+    primitive: "SSM (Selective State Space)"
+    shape: "(B,T,d_model) → (B,H,d_model)"
+    capacity: medium
+    min_data: 5000
+    config:
+      state_dim: {type: int, range: [8, 32], default: 16}
+      n_layers: {type: int, range: [1, 4], default: 2}
+      dropout: {type: float, default: 0.1}
+    use_conditions:
+      - "n_rows >= 5000"
+    prior_hint: "O(T) 복잡도. long-range + selectivity. AttentionMix 대비 효율적."
+
   RecurrentMix:
     source: "DeepAR (Salinas et al., 2020)"
     category: recurrence

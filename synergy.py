@@ -98,6 +98,21 @@ class SynergyChecker:
             corrected["decomposer"] = None
             rules.append("ANTAG-06: MovingAvgDecomp+stationary → 제거 (분해 불필요)")
 
+        # normalizer=None 강제 보정 (학습 폭발 방지)
+        if norm == "None" or corrected.get("normalizer") is None:
+            corrected["normalizer"] = {"type": "RevIN", "affine": True}
+            rules.append("ANTAG-07: normalizer=None → RevIN 강제 (학습 안정성)")
+
+        # d_model > n_features * 16 + LinearMix → d_model 하향
+        n_feats = (profile or {}).get("n_features", 7)
+        enc_cfg = corrected.get("encoder", {})
+        if isinstance(enc_cfg, dict):
+            d = enc_cfg.get("d_model", 64)
+            if mix == "LinearMix" and d > n_feats * 16:
+                new_d = min(d, max(32, n_feats * 8))
+                enc_cfg["d_model"] = new_d
+                rules.append(f"ANTAG-08: d_model {d}→{new_d} (Linear에 과한 d_model)")
+
         # ── Conditional (경고) ──
 
         # AttentionMix + 소형 데이터 → 경고

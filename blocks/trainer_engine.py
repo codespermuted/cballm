@@ -207,7 +207,7 @@ def train_model(
         "LinearProjection": 200, "PatchEmbedding": 2000, "FourierEmbedding": 1500,
         "LinearMix": 500, "MLPMix": 3000, "GatedMLPMix": 4000, "PatchMLPMix": 3000,
         "AttentionMix": 8000, "PatchAttentionMix": 10000, "ConvMix": 4000,
-        "RecurrentMix": 5000, "FrequencyMix": 3000,
+        "RecurrentMix": 5000, "FrequencyMix": 3000, "MambaMix": 6000,
         "FeatureMLPMix": 1000, "InvertedAttentionMix": 5000,
         "RevIN": 50, "BatchInstanceNorm": 100, "RobustScaler": 0,
         "MovingAvgDecomp": 0, "LinearHead": 100, "DistributionalHead": 200,

@@ -406,6 +406,10 @@ class KGMatcher:
             mix_rec = "PatchAttentionMix"
             mix_reason = "대규모+Patch"
             mix_conf = "medium"
+        elif n_rows >= 30000 and "MambaMix" in valid_compat:
+            mix_rec = "MambaMix"
+            mix_reason = f"대규모({n_rows}행), SSM 효율적"
+            mix_conf = "medium"
         elif level == "moderate" and n_rows >= 5000 and "MLPMix" in valid_compat:
             mix_rec = "MLPMix"
             mix_reason = "중간 복잡도, MLP 시도"
