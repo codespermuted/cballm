@@ -98,6 +98,20 @@ class SynergyChecker:
             corrected["decomposer"] = None
             rules.append("ANTAG-06: MovingAvgDecomp+stationary → 제거 (분해 불필요)")
 
+        # Positivity + negative_ratio 검증
+        neg_ratio = (profile or {}).get("negative_ratio", 0)
+        has_positivity = any(
+            (c.get("type") if isinstance(c, dict) else c) == "Positivity"
+            for c in corrected.get("constraint", [])
+        )
+        if has_positivity and neg_ratio > 0.001:
+            # 음수 > 0.1%: Positivity 제거
+            corrected["constraint"] = [
+                c for c in corrected.get("constraint", [])
+                if (c.get("type") if isinstance(c, dict) else c) != "Positivity"
+            ]
+            rules.append(f"ANTAG-09: Positivity 제거 (negative_ratio={neg_ratio:.3f})")
+
         # normalizer=None 강제 보정 (학습 폭발 방지)
         if norm == "None" or corrected.get("normalizer") is None:
             corrected["normalizer"] = {"type": "RevIN", "affine": True}

@@ -25,6 +25,7 @@ class DataProfile:
     target_max: float
     target_skew: float
     target_can_be_negative: bool
+    negative_ratio: float  # target < 0인 비율 (0~1)
 
     # 결측
     missing_pct: dict[str, float]  # col → 결측률
@@ -234,6 +235,7 @@ class Scout:
             target_max=round(float(np.nanmax(target)), 4),
             target_skew=round(float(pd.Series(target_clean).skew()), 4),
             target_can_be_negative=bool(np.nanmin(target) < 0),
+            negative_ratio=round(float((target_clean < 0).mean()), 4),
             missing_pct=missing, total_missing_pct=total_missing,
             is_stationary=is_stationary, adf_pvalue=round(adf_p, 6),
             seasonality=seasonality, dominant_period=dominant,

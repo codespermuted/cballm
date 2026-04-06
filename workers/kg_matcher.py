@@ -464,9 +464,19 @@ class KGMatcher:
 
         # ── Q8: Constraint ──
         constraints = []
-        if not can_neg and profile.get("target_min", 0) >= 0:
+        neg_ratio = profile.get("negative_ratio", 0)
+        target_min = profile.get("target_min", 0)
+        if target_min >= 0:
             constraints.append("Positivity")
-        if level == "complex" and seg_var > 5.0:
+        elif neg_ratio < 0.001:
+            # 음수 < 0.1%: 데이터 오류 가능성 → Positivity + 경고
+            constraints.append("Positivity")
+        elif neg_ratio < 0.05:
+            # 음수 0.1~5%: 드물지만 실제 → Clamp
+            constraints.append("Clamp")
+        # 음수 > 5%: constraint 없음
+
+        if seg_var > 5.0:
             constraints.append("VolatilityGate")
         slots["constraint"] = {
             "recommended": constraints if constraints else ["None"],
