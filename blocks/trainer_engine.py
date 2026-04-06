@@ -188,6 +188,7 @@ def train_model(
     device: str = "auto",
     extreme_percentile: float = 95,
     benchmark_mode: bool = False,
+    val_subset: str = "full",  # "full", "A" (전반), "B" (후반)
 ) -> TrainResult:
     """End-to-end 학습 파이프라인.
 
@@ -318,7 +319,15 @@ def train_model(
 
     if std_split:
         train_end, val_end, test_end = std_split
-        folds = [(train_end, train_end, val_end)]
+        # Val subset: A(전반 50%), B(후반 50%)
+        if val_subset == "A":
+            val_mid = (train_end + val_end) // 2
+            folds = [(train_end, train_end, val_mid)]
+        elif val_subset == "B":
+            val_mid = (train_end + val_end) // 2
+            folds = [(train_end, val_mid, val_end)]
+        else:
+            folds = [(train_end, train_end, val_end)]
         test_start = val_end
     else:
         folds, test_start = temporal_split(n_total, seq_len, pred_len, n_folds)

@@ -14,9 +14,11 @@ class Trainer:
     name = "trainer"
     description = "Config 기반 학습 실행 + 표준 결과 출력"
 
-    def __init__(self, cwd: str = "", rules: str = "", benchmark_mode: bool = False):
+    def __init__(self, cwd: str = "", rules: str = "", benchmark_mode: bool = False,
+                 val_subset: str = "full"):
         self.cwd = cwd
         self.benchmark_mode = benchmark_mode
+        self.val_subset = val_subset
 
     def run(self, task: str) -> dict:
         """task에서 config와 데이터 정보를 추출하여 학습 실행."""
@@ -72,6 +74,7 @@ class Trainer:
                 n_folds=n_folds,
                 batch_size=32,
                 benchmark_mode=self.benchmark_mode,
+                val_subset=self.val_subset,
             )
 
             response = result.to_json()

@@ -333,8 +333,10 @@ class Brain:
                 f"Architect Config:\n{config_json}\n"
             )
 
-            print(D.section_header("Training", "CV" if not self.benchmark_mode else "Bench"))
-            trainer = Trainer(self.cwd, benchmark_mode=self.benchmark_mode)
+            # Val subset 교대: 홀수 라운드 → A, 짝수 → B
+            val_sub = "A" if iteration % 2 == 1 else "B"
+            print(D.section_header("Training", f"Bench val_{val_sub}" if self.benchmark_mode else "CV"))
+            trainer = Trainer(self.cwd, benchmark_mode=self.benchmark_mode, val_subset=val_sub)
             trainer_result = trainer.run(trainer_task)
             self.log.append(trainer_result)
 
@@ -431,6 +433,27 @@ class Brain:
                 verdict.get("suggestions", []),
             )
 
+            # ── CompositeScore 계산 ──
+            from cballm.composite_score import compute_composite_score
+            current_mae = verdict.get("best_metric", {}).get("MAE")
+            current_norm_mse = verdict.get("best_metric", {}).get("norm_MSE")
+            baseline_mae = context.get("naive_mae", (current_mae or 1.0) * 1.5)
+            disagree_stab = diagnosis.disagreement.stability if diagnosis.disagreement else 1.0
+            dist_p = None
+            if diagnosis.residual and hasattr(diagnosis, 'diagnosis'):
+                # DistributionFitChecker 결과
+                pass  # dist_fit_pvalue는 아직 별도 저장 안 됨
+
+            composite = compute_composite_score(
+                val_mae=current_mae or 0,
+                baseline_mae=baseline_mae,
+                val_mae_by_step=val_mae_by_step if val_mae_by_step else None,
+                residual_diagnosis=diagnosis.residual if diagnosis else None,
+                disagreement_stability=disagree_stab,
+            )
+            if is_valid_training:
+                print(f"  CompositeScore: {composite.summary()}")
+
             # ── Ledger에 라운드 기록 ──
             config_hash = DiversityLedger.config_hash(config)
             round_record = RoundRecord(
@@ -442,11 +465,10 @@ class Brain:
                 diagnosis=diagnosis,
             )
             round_record._valid_training = is_valid_training
+            round_record._composite_score = composite
             self.ledger.add_round(round_record)
 
             # MAE/norm_MSE 저장 — 유효 학습만 비교 대상으로 갱신
-            current_mae = verdict.get("best_metric", {}).get("MAE")
-            current_norm_mse = verdict.get("best_metric", {}).get("norm_MSE")
             if is_valid_training and current_mae is not None:
                 context["prev_mae"] = current_mae
             if is_valid_training and current_norm_mse is not None:
